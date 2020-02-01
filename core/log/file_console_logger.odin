@@ -14,18 +14,18 @@ Level_Headers := []string{
 };
 
 Default_Console_Logger_Opts :: Options{
-    Option.Level,
-    Option.Terminal_Color,
-    Option.Short_File_Path,
-    Option.Line,
-    Option.Procedure,
+    .Level,
+    .Terminal_Color,
+    .Short_File_Path,
+    .Line,
+    .Procedure,
 } | Full_Timestamp_Opts;
 
 Default_File_Logger_Opts :: Options{
-    Option.Level,
-    Option.Short_File_Path,
-    Option.Line,
-    Option.Procedure,
+    .Level,
+    .Short_File_Path,
+    .Line,
+    .Procedure,
 } | Full_Timestamp_Opts;
 
 
@@ -69,7 +69,7 @@ file_console_logger_proc :: proc(logger_data: rawptr, level: Level, text: string
 
     h : os.Handle;
     if(data.file_handle != os.INVALID_HANDLE) do h = data.file_handle;
-    else                                      do h = level <= Level.Error ? os.stdout : os.stderr;
+    else                                      do h = level <= Level.Error ? context.stdout : context.stderr;
     backing: [1024]byte; //NOTE(Hoej): 1024 might be too much for a header backing, unless somebody has really long paths.
     buf := strings.builder_from_slice(backing[:]);
 
@@ -109,10 +109,10 @@ do_level_header :: proc(opts : Options, level : Level, str : ^strings.Builder) {
     case Level.Error, Level.Fatal : col = RED;
     }
 
-    if Option.Level in opts {
-        if Option.Terminal_Color in opts do fmt.sbprint(str, col);
+    if .Level in opts {
+        if .Terminal_Color in opts do fmt.sbprint(str, col);
         fmt.sbprint(str, Level_Headers[level]);
-        if Option.Terminal_Color in opts do fmt.sbprint(str, RESET);
+        if .Terminal_Color in opts do fmt.sbprint(str, RESET);
     }
 }
 
@@ -120,22 +120,21 @@ do_location_header :: proc(opts : Options, buf : ^strings.Builder, location := #
     if Location_Header_Opts & opts != nil do fmt.sbprint(buf, "["); else do return;
 
     file := location.file_path;
-    if Option.Short_File_Path in opts {
-        when os.OS == "windows" do delimiter := '\\'; else do delimiter := '/';
+    if .Short_File_Path in opts {
         last := 0;
-        for r, i in location.file_path do if r == delimiter do last = i+1;
+        for r, i in location.file_path do if r == '/' do last = i+1;
         file = location.file_path[last:];
     }
 
     if Location_File_Opts & opts != nil do fmt.sbprint(buf, file);
 
-    if Option.Procedure in opts {
+    if .Procedure in opts {
         if Location_File_Opts & opts != nil do fmt.sbprint(buf, ".");
         fmt.sbprintf(buf, "%s()", location.procedure);
     }
 
-    if Option.Line in opts {
-        if Location_File_Opts & opts != nil || Option.Procedure in opts do fmt.sbprint(buf, ":");
+    if .Line in opts {
+        if Location_File_Opts & opts != nil || .Procedure in opts do fmt.sbprint(buf, ":");
         fmt.sbprint(buf, location.line);
     }
 

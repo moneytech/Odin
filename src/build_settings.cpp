@@ -2,7 +2,7 @@ enum TargetOsKind {
 	TargetOs_Invalid,
 
 	TargetOs_windows,
-	TargetOs_osx,
+	TargetOs_darwin,
 	TargetOs_linux,
 	TargetOs_essence,
 
@@ -30,7 +30,7 @@ enum TargetEndianKind {
 String target_os_names[TargetOs_COUNT] = {
 	str_lit(""),
 	str_lit("windows"),
-	str_lit("osx"),
+	str_lit("darwin"),
 	str_lit("linux"),
 	str_lit("essence"),
 };
@@ -55,9 +55,7 @@ TargetEndianKind target_endians[TargetArch_COUNT] = {
 
 
 
-String const ODIN_VERSION = str_lit("0.9.2");
-String cross_compile_target = str_lit("");
-String cross_compile_lib_dir = str_lit("");
+String const ODIN_VERSION = str_lit("0.12.0");
 
 
 
@@ -66,6 +64,20 @@ struct TargetMetrics {
 	TargetArchKind arch;
 	isize          word_size;
 	isize          max_align;
+	String         target_triplet;
+};
+
+
+enum QueryDataSetKind {
+	QueryDataSet_Invalid,
+	QueryDataSet_GlobalDefinitions,
+	QueryDataSet_GoToDefinitions,
+};
+
+struct QueryDataSetSettings {
+	QueryDataSetKind kind;
+	bool ok;
+	bool compact;
 };
 
 
@@ -79,6 +91,7 @@ struct BuildContext {
 	String ODIN_VERSION; // compiler version
 	String ODIN_ROOT;    // Odin ROOT
 	bool   ODIN_DEBUG;   // Odin in debug mode
+	bool   ODIN_DISABLE_ASSERT; // Whether the default 'assert' et al is disabled in code or not
 
 	TargetEndianKind endian_kind;
 
@@ -90,25 +103,36 @@ struct BuildContext {
 
 	TargetMetrics metrics;
 
+	bool show_help;
+
 	String out_filepath;
 	String resource_filepath;
+	String pdb_filepath;
 	bool   has_resource;
 	String opt_flags;
 	String llc_flags;
+	String target_triplet;
 	String link_flags;
 	bool   is_dll;
 	bool   generate_docs;
 	i32    optimization_level;
 	bool   show_timings;
+	bool   show_more_timings;
 	bool   keep_temp_files;
+	bool   ignore_unknown_attributes;
 	bool   no_bounds_check;
 	bool   no_output_files;
 	bool   no_crt;
 	bool   use_lld;
 	bool   vet;
+	bool   cross_compiling;
+
+	QueryDataSetSettings query_data_set_settings;
 
 	gbAffinity affinity;
 	isize      thread_count;
+
+	Map<ExactValue> defined_values; // Key:
 };
 
 
@@ -116,18 +140,19 @@ struct BuildContext {
 gb_global BuildContext build_context = {0};
 
 
-
 gb_global TargetMetrics target_windows_386 = {
 	TargetOs_windows,
 	TargetArch_386,
 	4,
 	8,
+	str_lit("i686-pc-windows"),
 };
 gb_global TargetMetrics target_windows_amd64 = {
 	TargetOs_windows,
 	TargetArch_amd64,
 	8,
 	16,
+	str_lit("x86_64-pc-windows-gnu"),
 };
 
 gb_global TargetMetrics target_linux_386 = {
@@ -135,23 +160,47 @@ gb_global TargetMetrics target_linux_386 = {
 	TargetArch_386,
 	4,
 	8,
+	str_lit("i686-pc-linux-gnu"),
 };
 gb_global TargetMetrics target_linux_amd64 = {
 	TargetOs_linux,
 	TargetArch_amd64,
 	8,
 	16,
+	str_lit("x86_64-pc-linux-gnu"),
 };
 
-gb_global TargetMetrics target_osx_amd64 = {
-	TargetOs_osx,
+gb_global TargetMetrics target_darwin_amd64 = {
+	TargetOs_darwin,
 	TargetArch_amd64,
 	8,
 	16,
+	str_lit("x86_64-apple-darwin"),
 };
 
+gb_global TargetMetrics target_essence_amd64 = {
+	TargetOs_essence,
+	TargetArch_amd64,
+	8,
+	16,
+	str_lit("x86_64-pc-none-elf"),
+};
 
+struct NamedTargetMetrics {
+	String name;
+	TargetMetrics *metrics;
+};
 
+gb_global NamedTargetMetrics named_targets[] = {
+	{ str_lit("essence_amd64"), &target_essence_amd64 },
+	{ str_lit("darwin_amd64"),   &target_darwin_amd64 },
+	{ str_lit("linux_386"),     &target_linux_386 },
+	{ str_lit("linux_amd64"),   &target_linux_amd64 },
+	{ str_lit("windows_386"),   &target_windows_386 },
+	{ str_lit("windows_amd64"), &target_windows_amd64 },
+};
+
+NamedTargetMetrics *selected_target_metrics;
 
 TargetOsKind get_target_os_from_string(String str) {
 	for (isize i = 0; i < TargetOs_COUNT; i++) {
@@ -311,6 +360,8 @@ String odin_root_dir(void) {
 
 #include <mach-o/dyld.h>
 
+String path_to_fullpath(gbAllocator a, String s);
+
 String odin_root_dir(void) {
 	String path = global_module_path;
 	isize len, i;
@@ -344,7 +395,8 @@ String odin_root_dir(void) {
 	text = gb_alloc_array(string_buffer_allocator, u8, len + 1);
 	gb_memmove(text, &path_buf[0], len);
 
-	path = make_string(text, len);
+	path = path_to_fullpath(heap_allocator(), make_string(text, len));
+
 	for (i = path.len-1; i >= 0; i--) {
 		u8 c = path[i];
 		if (c == '/' || c == '\\') {
@@ -365,6 +417,8 @@ String odin_root_dir(void) {
 
 // NOTE: Linux / Unix is unfinished and not tested very well.
 #include <sys/stat.h>
+
+String path_to_fullpath(gbAllocator a, String s);
 
 String odin_root_dir(void) {
 	String path = global_module_path;
@@ -405,7 +459,7 @@ String odin_root_dir(void) {
 
 	gb_memmove(text, &path_buf[0], len);
 
-	path = make_string(text, len);
+	path = path_to_fullpath(heap_allocator(), make_string(text, len));
 	for (i = path.len-1; i >= 0; i--) {
 		u8 c = path[i];
 		if (c == '/' || c == '\\') {
@@ -439,6 +493,13 @@ String path_to_fullpath(gbAllocator a, String s) {
 		text[len] = 0;
 		result = string16_to_string(a, make_string16(text, len));
 		result = string_trim_whitespace(result);
+
+		// Replace Windows style separators
+		for (isize i = 0; i < result.len; i++) {
+			if (result.text[i] == '\\') {
+				result.text[i] = '/';
+			}
+		}
 	}
 
 	return result;
@@ -466,6 +527,7 @@ String get_fullpath_relative(gbAllocator a, String base_dir, String path) {
 	gb_memmove(str+i, "/", 1);                      i += 1;
 	gb_memmove(str+i, path.text,     path.len);     i += path.len;
 	str[i] = 0;
+
 
 	String res = make_string(str, i);
 	res = string_trim_whitespace(res);
@@ -495,7 +557,7 @@ String get_fullpath_core(gbAllocator a, String path) {
 
 
 
-void init_build_context(void) {
+void init_build_context(TargetMetrics *cross_target) {
 	BuildContext *bc = &build_context;
 
 	gb_affinity_init(&bc->affinity);
@@ -513,7 +575,7 @@ void init_build_context(void) {
 		#if defined(GB_SYSTEM_WINDOWS)
 			metrics = target_windows_amd64;
 		#elif defined(GB_SYSTEM_OSX)
-			metrics = target_osx_amd64;
+			metrics = target_darwin_amd64;
 		#else
 			metrics = target_linux_amd64;
 		#endif
@@ -527,8 +589,9 @@ void init_build_context(void) {
 		#endif
 	#endif
 
-	if (cross_compile_target.len) {
-		bc->ODIN_OS = cross_compile_target;
+	if (cross_target) {
+		metrics = *cross_target;
+		bc->cross_compiling = true;
 	}
 
 	GB_ASSERT(metrics.os != TargetOs_Invalid);
@@ -546,6 +609,7 @@ void init_build_context(void) {
 	bc->max_align   = metrics.max_align;
 	bc->link_flags  = str_lit(" ");
 	bc->opt_flags   = str_lit(" ");
+	bc->target_triplet = metrics.target_triplet;
 
 
 	gbString llc_flags = gb_string_make_reserve(heap_allocator(), 64);
@@ -563,7 +627,7 @@ void init_build_context(void) {
 		case TargetOs_windows:
 			bc->link_flags = str_lit("/machine:x64 ");
 			break;
-		case TargetOs_osx:
+		case TargetOs_darwin:
 			break;
 		case TargetOs_linux:
 			bc->link_flags = str_lit("-arch x86-64 ");
@@ -576,7 +640,7 @@ void init_build_context(void) {
 		case TargetOs_windows:
 			bc->link_flags = str_lit("/machine:x86 ");
 			break;
-		case TargetOs_osx:
+		case TargetOs_darwin:
 			gb_printf_err("Unsupported architecture\n");
 			gb_exit(1);
 			break;

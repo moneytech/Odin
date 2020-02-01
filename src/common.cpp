@@ -7,15 +7,20 @@
 #include <intrin.h>
 #endif
 
+#if defined(GB_SYSTEM_WINDOWS)
+#define NOMINMAX            1
+#include <windows.h>
+#undef NOMINMAX
+#endif
+
+#define GB_WINDOWS_H_INCLUDED
 #define GB_IMPLEMENTATION
 #include "gb/gb.h"
-
 
 #include <wchar.h>
 #include <stdio.h>
 
 #include <math.h>
-
 
 template <typename U, typename V>
 gb_inline U bit_cast(V &v) { return reinterpret_cast<U &>(v); }
@@ -73,16 +78,18 @@ GB_ALLOCATOR_PROC(heap_allocator_proc) {
 		ptr = _aligned_realloc(old_memory, size, alignment);
 		break;
 	#else
-	case gbAllocation_Alloc:
+	case gbAllocation_Alloc: {
+		isize aligned_size = align_formula_isize(size, alignment);
 		// TODO(bill): Make sure this is aligned correctly
-		ptr = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, align_formula_isize(size, alignment));
-		break;
+		ptr = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, aligned_size);
+	} break;
 	case gbAllocation_Free:
 		HeapFree(GetProcessHeap(), 0, old_memory);
 		break;
-	case gbAllocation_Resize:
-		ptr = HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, old_memory, align_formula_isize(size, alignment));
-		break;
+	case gbAllocation_Resize: {
+		isize aligned_size = align_formula_isize(size, alignment);
+		ptr = HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, old_memory, aligned_size);
+	} break;
 	#endif
 
 #elif defined(GB_SYSTEM_LINUX)
@@ -137,11 +144,14 @@ GB_ALLOCATOR_PROC(heap_allocator_proc) {
 }
 
 #include "unicode.cpp"
-#include "string.cpp"
 #include "array.cpp"
+#include "string.cpp"
 #include "murmurhash3.cpp"
 
 #define for_array(index_, array_) for (isize index_ = 0; index_ < (array_).count; index_++)
+
+#include "range_cache.cpp"
+
 
 
 u64 fnv64a(void const *data, isize len) {
@@ -203,16 +213,22 @@ u64 u64_from_string(String string) {
 	return result;
 }
 
+gb_global char const global_num_to_char_table[] =
+	"0123456789"
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	"abcdefghijklmnopqrstuvwxyz"
+	"@$";
+
 String u64_to_string(u64 v, char *out_buf, isize out_buf_len) {
 	char buf[32] = {0};
 	isize i = gb_size_of(buf);
 
 	u64 b = 10;
 	while (v >= b) {
-		buf[--i] = gb__num_to_char_table[v%b];
+		buf[--i] = global_num_to_char_table[v%b];
 		v /= b;
 	}
-	buf[--i] = gb__num_to_char_table[v%b];
+	buf[--i] = global_num_to_char_table[v%b];
 
 	isize len = gb_min(gb_size_of(buf)-i, out_buf_len);
 	gb_memmove(out_buf, &buf[i], len);
@@ -230,10 +246,10 @@ String i64_to_string(i64 a, char *out_buf, isize out_buf_len) {
 	u64 v = cast(u64)a;
 	u64 b = 10;
 	while (v >= b) {
-		buf[--i] = gb__num_to_char_table[v%b];
+		buf[--i] = global_num_to_char_table[v%b];
 		v /= b;
 	}
-	buf[--i] = gb__num_to_char_table[v%b];
+	buf[--i] = global_num_to_char_table[v%b];
 
 	if (negative) {
 		buf[--i] = '-';
@@ -323,7 +339,7 @@ void mul_overflow_u64(u64 x, u64 y, u64 *lo, u64 *hi) {
 #include "ptr_set.cpp"
 #include "string_set.cpp"
 #include "priority_queue.cpp"
-
+#include "thread_pool.cpp"
 
 
 gb_global String global_module_path = {0};
@@ -365,7 +381,7 @@ void arena_grow(Arena *arena, isize min_size) {
 	size = ALIGN_UP(size, ARENA_MIN_ALIGNMENT);
 	void *new_ptr = gb_alloc(arena->backing, size);
 	arena->ptr = cast(u8 *)new_ptr;
-	gb_zero_size(arena->ptr, size);
+	// gb_zero_size(arena->ptr, size); // NOTE(bill): This should already be zeroed
 	GB_ASSERT(arena->ptr == ALIGN_DOWN_PTR(arena->ptr, ARENA_MIN_ALIGNMENT));
 	arena->end = arena->ptr + size;
 	array_add(&arena->blocks, arena->ptr);
@@ -427,7 +443,7 @@ GB_ALLOCATOR_PROC(arena_allocator_proc) {
 		ptr = arena_alloc(arena, size, alignment);
 		break;
 	case gbAllocation_Free:
-		GB_PANIC("gbAllocation_Free not supported");
+		// GB_PANIC("gbAllocation_Free not supported");
 		break;
 	case gbAllocation_Resize:
 		GB_PANIC("gbAllocation_Resize: not supported");
@@ -734,7 +750,15 @@ String path_to_full_path(gbAllocator a, String path) {
 	defer (gb_free(ha, path_c));
 
 	char *fullpath = gb_path_get_full_name(a, path_c);
-	return make_string_c(fullpath);
+	String res = string_trim_whitespace(make_string_c(fullpath));
+#if defined(GB_SYSTEM_WINDOWS)
+	for (isize i = 0; i < res.len; i++) {
+		if (res.text[i] == '\\') {
+			res.text[i] = '/';
+		}
+	}
+#endif
+	return res;
 }
 
 
@@ -857,7 +881,6 @@ ReadDirectoryError read_directory(String path, Array<FileInfo> *fi) {
 		info.size = size;
 		info.is_dir = (file_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 		array_add(fi, info);
-
 	} while (FindNextFileW(find_file, &file_data));
 
 	if (fi->count == 0) {

@@ -1,11 +1,11 @@
 package json
 
 import "core:mem"
-import "core:bits"
+import "core:math/bits"
 import "core:runtime"
 import "core:strconv"
 import "core:strings"
-import "core:types"
+import "core:reflect"
 
 Marshal_Error :: enum {
 	None,
@@ -40,7 +40,7 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 	ti := type_info_base(type_info_of(v.id));
 	a := any{v.data, ti.id};
 
-	switch info in ti.variant {
+	#partial switch info in ti.variant {
 	case Type_Info_Named:
 		panic("Unreachable");
 
@@ -95,17 +95,17 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 		buf: [386]byte;
 
 		str := strconv.append_float(buf[1:], val, 'f', 2*ti.size, 8*ti.size);
-		str = string(buf[:len(str)+1]);
-		if str[1] == '+' || str[1] == '-' {
-			str = str[1:];
+		s := buf[:len(str)+1];
+		if s[1] == '+' || s[1] == '-' {
+			s = s[1:];
 		} else {
-			str[0] = '+';
+			s[0] = '+';
 		}
-		if str[0] == '+' {
-			str = str[1:];
+		if s[0] == '+' {
+			s = s[1:];
 		}
 
-		write_string(b, str);
+		write_string(b, string(s));
 
 	case Type_Info_Complex:
 		return Marshal_Error.Unsupported_Type;
@@ -144,7 +144,7 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 
 	case Type_Info_Array:
 		write_byte(b, '[');
-		for i in 0..info.count-1 {
+		for i in 0..<info.count {
 			if i > 0 do write_string(b, ", ");
 
 			data := uintptr(v.data) + uintptr(i*info.elem_size);
@@ -155,7 +155,7 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 	case Type_Info_Dynamic_Array:
 		write_byte(b, '[');
 		array := cast(^mem.Raw_Dynamic_Array)v.data;
-		for i in 0..array.len-1 {
+		for i in 0..<array.len {
 			if i > 0 do write_string(b, ", ");
 
 			data := uintptr(array.data) + uintptr(i*info.elem_size);
@@ -166,7 +166,7 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 	case Type_Info_Slice:
 		write_byte(b, '[');
 		slice := cast(^mem.Raw_Slice)v.data;
-		for i in 0..slice.len-1 {
+		for i in 0..<slice.len {
 			if i > 0 do write_string(b, ", ");
 
 			data := uintptr(slice.data) + uintptr(i*info.elem_size);
@@ -188,13 +188,13 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 			entry_type := ed.elem.variant.(Type_Info_Struct);
 			entry_size := ed.elem_size;
 
-			for i in 0..entries.len-1 {
+			for i in 0..<entries.len {
 				if i > 0 do write_string(b, ", ");
 
 				data := uintptr(entries.data) + uintptr(i*entry_size);
 				header := cast(^Map_Entry_Header)data;
 
-				if types.is_string(info.key) {
+				if reflect.is_string(info.key) {
 					marshal_arg(b, header.key.str);
 				} else {
 					marshal_arg(b, any{rawptr(&header.key.hash), info.key.id});
@@ -281,14 +281,13 @@ marshal_arg :: proc(b: ^strings.Builder, v: any) -> Marshal_Error {
 			if ti == nil {
 				return false;
 			}
-			ti = runtime.type_info_base(ti);
-			switch info in ti.variant {
+			t := runtime.type_info_base(ti);
+			#partial switch info in t.variant {
 			case runtime.Type_Info_Integer:
-				using runtime.Type_Info_Endianness;
 				switch info.endianness {
-				case Platform: return false;
-				case Little:   return ODIN_ENDIAN != "little";
-				case Big:      return ODIN_ENDIAN != "big";
+				case .Platform: return false;
+				case .Little:   return ODIN_ENDIAN != "little";
+				case .Big:      return ODIN_ENDIAN != "big";
 				}
 			}
 			return false;

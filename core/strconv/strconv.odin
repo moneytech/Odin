@@ -1,14 +1,6 @@
 package strconv
 
-using import "core:decimal"
-
-Int_Flag :: enum {
-	Prefix,
-	Plus,
-	Space,
-}
-Int_Flags :: bit_set[Int_Flag];
-
+import "core:unicode/utf8"
 
 parse_bool :: proc(s: string) -> (result: bool = false, ok: bool) {
 	switch s {
@@ -31,7 +23,8 @@ _digit_value :: proc(r: rune) -> int {
 	return v;
 }
 
-parse_i64 :: proc(s: string) -> i64 {
+parse_i64 :: proc(str: string) -> i64 {
+	s := str;
 	neg := false;
 	if len(s) > 1 {
 		switch s[0] {
@@ -74,7 +67,8 @@ parse_i64 :: proc(s: string) -> i64 {
 	return value;
 }
 
-parse_u64 :: proc(s: string) -> u64 {
+parse_u64 :: proc(str: string) -> u64 {
+	s := str;
 	neg := false;
 	if len(s) > 1 && s[0] == '+' {
 		s = s[1:];
@@ -110,7 +104,7 @@ parse_u64 :: proc(s: string) -> u64 {
 parse_int :: proc(s: string) -> int {
 	return int(parse_i64(s));
 }
-parse_uint :: proc(s: string, base: int) -> uint {
+parse_uint :: proc(s: string) -> uint {
 	return uint(parse_u64(s));
 }
 
@@ -193,8 +187,8 @@ parse_f64 :: proc(s: string) -> f64 {
 
 append_bool :: proc(buf: []byte, b: bool) -> string {
 	n := 0;
-	if b do n = copy(buf, cast([]byte)"true");
-	else do n = copy(buf, cast([]byte)"false");
+	if b do n = copy(buf, "true");
+	else do n = copy(buf, "false");
 	return string(buf[:n]);
 }
 
@@ -204,303 +198,111 @@ append_uint :: proc(buf: []byte, u: u64, base: int) -> string {
 append_int :: proc(buf: []byte, i: i64, base: int) -> string {
 	return append_bits(buf, u64(i), base, true, 8*size_of(int), digits, nil);
 }
-itoa :: proc(buf: []byte, i: int) -> string do return append_int(buf, i64(i), 10);
 
+itoa :: proc(buf: []byte, i: int) -> string {
+	return append_int(buf, i64(i), 10);
+}
+atoi :: proc(s: string) -> int {
+	return parse_int(s);
+}
+atof :: proc(s: string) -> f64 {
+	return parse_f64(s);
+}
+
+ftoa :: append_float;
 append_float :: proc(buf: []byte, f: f64, fmt: byte, prec, bit_size: int) -> string {
 	return string(generic_ftoa(buf, f, fmt, prec, bit_size));
 }
 
 
+quote :: proc(buf: []byte, str: string) -> string {
+	write_byte :: inline proc(buf: []byte, i: ^int, bytes: ..byte) {
+		if i^ >= len(buf) do return;
+		n := copy(buf[i^:], bytes[:]);
+		i^ += n;
+	}
 
+	if buf == nil {
+		return "";
+	}
 
-DecimalSlice :: struct {
-	digits:        []byte,
-	count:         int,
-	decimal_point: int,
-	neg:           bool,
+	c :: '"';
+	i := 0;
+	s := str;
+
+	write_byte(buf, &i, c);
+	for width := 0; len(s) > 0; s = s[width:] {
+		r := rune(s[0]);
+		width = 1;
+		if r >= utf8.RUNE_SELF {
+			r, width = utf8.decode_rune_in_string(s);
+		}
+		if width == 1 && r == utf8.RUNE_ERROR {
+			write_byte(buf, &i, '\\', 'x');
+			write_byte(buf, &i, digits[s[0]>>4]);
+			write_byte(buf, &i, digits[s[0]&0xf]);
+		}
+		if i < len(buf) {
+			x := quote_rune(buf[i:], r);
+			i += len(x);
+		}
+	}
+	write_byte(buf, &i, c);
+	return string(buf[:i]);
 }
 
-FloatInfo :: struct {
-	mantbits: uint,
-	expbits:  uint,
-	bias:     int,
-}
+quote_rune :: proc(buf: []byte, r: rune) -> string {
+	write_byte :: inline proc(buf: []byte, i: ^int, bytes: ..byte) {
+		if i^ < len(buf) {
+			n := copy(buf[i^:], bytes[:]);
+			i^ += n;
+		}
+	}
+	write_string :: inline proc(buf: []byte, i: ^int, s: string) {
+		if i^ < len(buf) {
+			n := copy(buf[i^:], s);
+			i^ += n;
+		}
+	}
+	write_rune :: inline proc(buf: []byte, i: ^int, r: rune) {
+		if i^ < len(buf) {
+			b, w := utf8.encode_rune(r);
+			n := copy(buf[i^:], b[:w]);
+			i^ += n;
+		}
+	}
 
+	if buf == nil {
+		return "";
+	}
 
-_f16_info := FloatInfo{10, 5,   -15};
-_f32_info := FloatInfo{23, 8,  -127};
-_f64_info := FloatInfo{52, 11, -1023};
+	i := 0;
+	write_byte(buf, &i, '\'');
 
-
-generic_ftoa :: proc(buf: []byte, val: f64, fmt: byte, prec, bit_size: int) -> []byte {
-	bits: u64;
-	flt: ^FloatInfo;
-	switch bit_size {
-	case 32:
-		bits = u64(transmute(u32)f32(val));
-		flt = &_f32_info;
-	case 64:
-		bits = transmute(u64)val;
-		flt = &_f64_info;
+	switch r {
+	case '\a': write_string(buf, &i, "\\a");
+	case '\b': write_string(buf, &i, "\\b");
+	case '\e': write_string(buf, &i, "\\e");
+	case '\f': write_string(buf, &i, "\\f");
+	case '\n': write_string(buf, &i, "\\n");
+	case '\r': write_string(buf, &i, "\\r");
+	case '\t': write_string(buf, &i, "\\t");
+	case '\v': write_string(buf, &i, "\\v");
 	case:
-		panic("strconv: invalid bit_size");
-	}
-
-	neg  := bits>>(flt.expbits+flt.mantbits) != 0;
-	exp  := int(bits>>flt.mantbits) & (1<<flt.expbits - 1);
-	mant := bits & (u64(1) << flt.mantbits - 1);
-
-	switch exp {
-	case 1<<flt.expbits - 1:
-		s: string;
-		if mant != 0 {
-			s = "NaN";
-		} else if neg {
-			s = "-Inf";
-		} else {
-			s = "+Inf";
-		}
-		n := copy(buf, cast([]byte)s);
-		return buf[:n];
-
-	case 0: // denormalized
-		exp += 1;
-
-	case:
-		mant |= u64(1) << flt.mantbits;
-	}
-
-	exp += flt.bias;
-
-	d_: Decimal;
-	d := &d_;
-	assign(d, mant);
-	shift(d, exp - int(flt.mantbits));
-	digs: DecimalSlice;
-	shortest := prec < 0;
-	if shortest {
-		round_shortest(d, mant, exp, flt);
-		digs = DecimalSlice{digits = d.digits[:], count = d.count, decimal_point = d.decimal_point};
-		switch fmt {
-		case 'e', 'E': prec = digs.count-1;
-		case 'f', 'F': prec = max(digs.count-digs.decimal_point, 0);
-		case 'g', 'G': prec = digs.count;
-		}
-	} else {
-		switch fmt {
-		case 'e', 'E': round(d, prec+1);
-		case 'f', 'F': round(d, d.decimal_point+prec);
-		case 'g', 'G':
-			if prec == 0 {
-				prec = 1;
-			}
-			round(d, prec);
-		}
-
-		digs = DecimalSlice{digits = d.digits[:], count = d.count, decimal_point = d.decimal_point};
-	}
-	return format_digits(buf, shortest, neg, digs, prec, fmt);
-}
-
-
-
-format_digits :: proc(buf: []byte, shortest: bool, neg: bool, digs: DecimalSlice, prec: int, fmt: byte) -> []byte {
-	Buffer :: struct {
-		b: []byte,
-		n: int,
-	}
-
-	to_bytes :: proc(b: Buffer) -> []byte do return b.b[:b.n];
-	add_bytes :: proc(buf: ^Buffer, bytes: ..byte) {
-		buf.n += copy(buf.b[buf.n:], bytes);
-	}
-
-	b := Buffer{b = buf};
-
-	switch fmt {
-	case 'f', 'F':
-		add_bytes(&b, neg ? '-' : '+');
-
-		// integer, padded with zeros when needed
-		if digs.decimal_point > 0 {
-			m := min(digs.count, digs.decimal_point);
-			add_bytes(&b, ..digs.digits[0:m]);
-			for ; m < digs.decimal_point; m += 1 {
-				add_bytes(&b, '0');
+		if r < 32 {
+			write_string(buf, &i, "\\x");
+			b: [2]byte;
+			s := append_bits(b[:], u64(r), 16, true, 64, digits, nil);
+			switch len(s) {
+			case 0: write_string(buf, &i, "00");
+			case 1: write_rune(buf, &i, '0');
+			case 2: write_string(buf, &i, s);
 			}
 		} else {
-			add_bytes(&b, '0');
+			write_rune(buf, &i, r);
 		}
-
-
-		// fractional part
-		if prec > 0 {
-			add_bytes(&b, '.');
-			for i in 0..prec-1 {
-				c: byte = '0';
-				if j := digs.decimal_point + i; 0 <= j && j < digs.count {
-					c = digs.digits[j];
-				}
-				add_bytes(&b, c);
-			}
-		}
-		return to_bytes(b);
-
-	case 'e', 'E':
-		panic("strconv: e/E float printing is not yet supported");
-		return to_bytes(b); // TODO
-
-	case 'g', 'G':
-		panic("strconv: g/G float printing is not yet supported");
-		return to_bytes(b); // TODO
-
-	case:
-		add_bytes(&b, '%', fmt);
-		return to_bytes(b);
 	}
+	write_byte(buf, &i, '\'');
 
-
+	return string(buf[:i]);
 }
-
-round_shortest :: proc(d: ^Decimal, mant: u64, exp: int, flt: ^FloatInfo) {
-	if mant == 0 { // If mantissa is zero, the number is zero
-		d.count = 0;
-		return;
-	}
-
-	/*
-		10^(dp-nd) > 2^(exp-mantbits)
-		log2(10) * (dp-nd) > exp-mantbits
-		log(2) >~ 0.332
-		332*(dp-nd) >= 100*(exp-mantbits)
-	 */
-	minexp := flt.bias+1;
-	if exp > minexp && 332*(d.decimal_point-d.count) >= 100*(exp - int(flt.mantbits)) {
-		// Number is already its shortest
-		return;
-	}
-
-	upper_: Decimal; upper := &upper_;
-	assign(upper, 2*mant - 1);
-	shift(upper, exp - int(flt.mantbits) - 1);
-
-	mantlo: u64;
-	explo:  int;
-	if mant > 1<<flt.mantbits || exp == minexp {
-		mantlo = mant-1;
-		explo = exp;
-	} else {
-		mantlo = 2*mant - 1;
-		explo = exp-1;
-	}
-	lower_: Decimal; lower := &lower_;
-	assign(lower, 2*mantlo + 1);
-	shift(lower, explo - int(flt.mantbits) - 1);
-
-	inclusive := mant%2 == 0;
-
-	for i in 0..d.count-1 {
-		l: byte = '0'; // lower digit
-		if i < lower.count {
-			l = lower.digits[i];
-		}
-		m := d.digits[i];   // middle digit
-		u: byte = '0'; // upper digit
-		if i < upper.count {
-			u = upper.digits[i];
-		}
-
-		ok_round_down := l != m || inclusive && i+1 == lower.count;
-		ok_round_up   := m != u && (inclusive || m+1 < u || i+1 < upper.count);
-
-		if ok_round_down && ok_round_up {
-			round(d, i+1);
-			return;
-		}
-		if ok_round_down {
-			round_down(d, i+1);
-			return;
-		}
-		if ok_round_up {
-			round_up(d, i+1);
-			return;
-		}
-	}
-
-}
-
-MAX_BASE :: 32;
-digits := "0123456789abcdefghijklmnopqrstuvwxyz";
-
-
-is_integer_negative :: proc(u: u64, is_signed: bool, bit_size: int) -> (unsigned: u64, neg: bool) {
-	if is_signed {
-		switch bit_size {
-		case 8:
-			i := i8(u);
-			neg = i < 0;
-			u = u64(abs(i64(i)));
-		case 16:
-			i := i16(u);
-			neg = i < 0;
-			u = u64(abs(i64(i)));
-		case 32:
-			i := i32(u);
-			neg = i < 0;
-			u = u64(abs(i64(i)));
-		case 64:
-			i := i64(u);
-			neg = i < 0;
-			u = u64(abs(i64(i)));
-		case:
-			panic("is_integer_negative: Unknown integer size");
-		}
-	}
-	return u, neg;
-}
-
-append_bits :: proc(buf: []byte, u: u64, base: int, is_signed: bool, bit_size: int, digits: string, flags: Int_Flags) -> string {
-	if base < 2 || base > MAX_BASE {
-		panic("strconv: illegal base passed to append_bits");
-	}
-
-	neg: bool;
-	a: [129]byte;
-	i := len(a);
-	u, neg = is_integer_negative(u, is_signed, bit_size);
-	b := u64(base);
-	for u >= b {
-		i-=1; a[i] = digits[u % b];
-		u /= b;
-	}
-	i-=1; a[i] = digits[u % b];
-
-	if Int_Flag.Prefix in flags {
-		ok := true;
-		switch base {
-		case  2: i-=1; a[i] = 'b';
-		case  8: i-=1; a[i] = 'o';
-		case 10: i-=1; a[i] = 'd';
-		case 12: i-=1; a[i] = 'z';
-		case 16: i-=1; a[i] = 'x';
-		case: ok = false;
-		}
-		if ok {
-			i-=1; a[i] = '0';
-		}
-	}
-
-	switch {
-	case neg:
-		i-=1; a[i] = '-';
-	case Int_Flag.Plus in flags:
-		i-=1; a[i] = '+';
-	case Int_Flag.Space in flags:
-		i-=1; a[i] = ' ';
-	}
-
-	out := a[i:];
-	copy(buf, out);
-	return string(buf[0:len(out)]);
-}
-

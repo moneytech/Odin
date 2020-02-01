@@ -10,7 +10,6 @@ enum AddressingMode {
 	Addressing_Invalid,       // invalid addressing mode
 	Addressing_NoValue,       // no value (void in C)
 	Addressing_Value,         // computed value (rvalue)
-	Addressing_Immutable,     // immutable computed value (const rvalue)
 	Addressing_Context,       // context value
 	Addressing_Variable,      // addressable variable (lvalue)
 	Addressing_Constant,      // constant
@@ -21,6 +20,7 @@ enum AddressingMode {
 	                          // 	lhs: acts like a Variable
 	                          // 	rhs: acts like OptionalOk
 	Addressing_OptionalOk,    // rhs: acts like a value with an optional boolean part (for existence check)
+	Addressing_SoaVariable,   // Struct-Of-Arrays indexed variable
 };
 
 struct TypeAndValue {
@@ -93,7 +93,6 @@ struct AstFile {
 	bool         allow_in_expr; // NOTE(bill): in expression are only allowed in certain cases
 	bool         in_foreign_block;
 	bool         allow_type;
-	isize        when_level;
 
 	Array<Ast *> decls;
 	Array<Ast *> imports; // 'import' 'using import'
@@ -135,12 +134,25 @@ struct Parser {
 	Map<AstPackage *>      package_map; // Key: String (package name)
 	Array<AstPackage *>    packages;
 	Array<ImportedPackage> package_imports;
-	Array<ImportedFile>    files_to_process;
+	isize                  file_to_process_count;
 	isize                  total_token_count;
 	isize                  total_line_count;
 	gbMutex                file_add_mutex;
 	gbMutex                file_decl_mutex;
 };
+
+
+gb_global ThreadPool parser_thread_pool = {};
+
+struct ParserWorkerData {
+	Parser *parser;
+	ImportedFile imported_file;
+};
+
+
+
+
+
 
 enum ProcInlining {
 	ProcInlining_none = 0,
@@ -152,7 +164,6 @@ enum ProcTag {
 	ProcTag_bounds_check    = 1<<0,
 	ProcTag_no_bounds_check = 1<<1,
 	ProcTag_require_results = 1<<4,
-	ProcTag_no_context      = 1<<6,
 };
 
 enum ProcCallingConvention {
@@ -167,15 +178,23 @@ enum ProcCallingConvention {
 	// ProcCC_VectorCall,
 	// ProcCC_ClrCall,
 
+	ProcCC_None,
+
+
 	ProcCC_ForeignBlockDefault = -1,
 };
 
-enum StmtStateFlag {
-	StmtStateFlag_bounds_check    = 1<<0,
-	StmtStateFlag_no_bounds_check = 1<<1,
+enum StateFlag {
+	StateFlag_bounds_check    = 1<<0,
+	StateFlag_no_bounds_check = 1<<1,
 
-	StmtStateFlag_no_deferred = 1<<5,
+	StateFlag_no_deferred = 1<<5,
 };
+
+enum ViralStateFlag {
+	ViralStateFlag_ContainsDeferredProcedure = 1<<0,
+};
+
 
 enum FieldFlag {
 	FieldFlag_NONE      = 0,
@@ -185,13 +204,12 @@ enum FieldFlag {
 	FieldFlag_c_vararg  = 1<<3,
 	FieldFlag_auto_cast = 1<<4,
 
-	FieldFlag_in        = 1<<5,
-
+	FieldFlag_Tags = 1<<10,
 
 	FieldFlag_Results   = 1<<16,
 
 	FieldFlag_Signature = FieldFlag_ellipsis|FieldFlag_using|FieldFlag_no_alias|FieldFlag_c_vararg|FieldFlag_auto_cast,
-	FieldFlag_Struct    = FieldFlag_using,
+	FieldFlag_Struct    = FieldFlag_using|FieldFlag_Tags,
 };
 
 enum StmtAllowFlag {
@@ -209,6 +227,7 @@ enum StmtAllowFlag {
 	AST_KIND(Undef,          "undef",           Token) \
 	AST_KIND(BasicLit,       "basic literal",   struct { \
 		Token token; \
+		ExactValue value; \
 	}) \
 	AST_KIND(BasicDirective, "basic directive", struct { \
 		Token  token; \
@@ -229,20 +248,23 @@ enum StmtAllowFlag {
 		Ast *body; \
 		u64  tags; \
 		ProcInlining inlining; \
+		Token where_token; \
+		Array<Ast *> where_clauses; \
 	}) \
 	AST_KIND(CompoundLit, "compound literal", struct { \
 		Ast *type; \
 		Array<Ast *> elems; \
 		Token open, close; \
+		i64 max_count; \
 	}) \
 AST_KIND(_ExprBegin,  "",  bool) \
 	AST_KIND(BadExpr,      "bad expression",         struct { Token begin, end; }) \
 	AST_KIND(TagExpr,      "tag expression",         struct { Token token, name; Ast *expr; }) \
-	AST_KIND(RunExpr,      "run expression",         struct { Token token, name; Ast *expr; }) \
 	AST_KIND(UnaryExpr,    "unary expression",       struct { Token op; Ast *expr; }) \
 	AST_KIND(BinaryExpr,   "binary expression",      struct { Token op; Ast *left, *right; } ) \
 	AST_KIND(ParenExpr,    "parentheses expression", struct { Ast *expr; Token open, close; }) \
 	AST_KIND(SelectorExpr, "selector expression",    struct { Token token; Ast *expr, *selector; }) \
+	AST_KIND(ImplicitSelectorExpr, "implicit selector expression",    struct { Token token; Ast *selector; }) \
 	AST_KIND(IndexExpr,    "index expression",       struct { Ast *expr, *index; Token open, close; }) \
 	AST_KIND(DerefExpr,    "dereference expression", struct { Token op; Ast *expr; }) \
 	AST_KIND(SliceExpr,    "slice expression", struct { \
@@ -325,6 +347,15 @@ AST_KIND(_ComplexStmtBegin, "", bool) \
 		Ast *expr; \
 		Ast *body; \
 	}) \
+	AST_KIND(InlineRangeStmt, "inline range statement", struct { \
+		Token inline_token; \
+		Token for_token; \
+		Ast *val0; \
+		Ast *val1; \
+		Token in_token; \
+		Ast *expr; \
+		Ast *body; \
+	}) \
 	AST_KIND(CaseClause, "case clause", struct { \
 		Token token;             \
 		Array<Ast *> list;   \
@@ -332,20 +363,20 @@ AST_KIND(_ComplexStmtBegin, "", bool) \
 		Entity *implicit_entity; \
 	}) \
 	AST_KIND(SwitchStmt, "switch statement", struct { \
-		Token token;    \
-		Ast *label;    \
-		Ast *init;     \
-		Ast *tag;      \
-		Ast *body;     \
-		bool complete; \
+		Token token;  \
+		Ast *label;   \
+		Ast *init;    \
+		Ast *tag;     \
+		Ast *body;    \
+		bool partial; \
 	}) \
 	AST_KIND(TypeSwitchStmt, "type switch statement", struct { \
-		Token token;   \
-		Ast *label;    \
-		Ast *tag;      \
-		Ast *body;     \
-		bool complete; \
-	}) \
+		Token token; \
+		Ast *label;  \
+		Ast *tag;    \
+		Ast *body;   \
+		bool partial; \
+}) \
 	AST_KIND(DeferStmt,  "defer statement",  struct { Token token; Ast *stmt; }) \
 	AST_KIND(BranchStmt, "branch statement", struct { Token token; Ast *label; }) \
 	AST_KIND(UsingStmt,  "using statement",  struct { \
@@ -374,7 +405,6 @@ AST_KIND(_DeclBegin,      "", bool) \
 		Array<Ast *> attributes;  \
 		CommentGroup *docs;       \
 		CommentGroup *comment;    \
-		bool          is_static;  \
 		bool          is_using;   \
 		bool          is_mutable; \
 	}) \
@@ -400,13 +430,13 @@ AST_KIND(_DeclBegin,      "", bool) \
 		Token    library_name;    \
 		String   collection_name; \
 		Array<String> fullpaths;  \
+		Array<Ast *> attributes;  \
 		CommentGroup *docs;       \
 		CommentGroup *comment;    \
 	}) \
 AST_KIND(_DeclEnd,   "", bool) \
 	AST_KIND(Attribute, "attribute", struct { \
 		Token token;        \
-		Ast *type;          \
 		Array<Ast *> elems; \
 		Token open, close;  \
 	}) \
@@ -414,6 +444,7 @@ AST_KIND(_DeclEnd,   "", bool) \
 		Array<Ast *> names;         \
 		Ast *        type;          \
 		Ast *        default_value; \
+		Token        tag;           \
 		u32              flags;     \
 		CommentGroup *   docs;      \
 		CommentGroup *   comment;   \
@@ -421,10 +452,6 @@ AST_KIND(_DeclEnd,   "", bool) \
 	AST_KIND(FieldList, "field list", struct { \
 		Token token;       \
 		Array<Ast *> list; \
-	}) \
-	AST_KIND(UnionField, "union field", struct { \
-		Ast *name; \
-		Ast *list; \
 	}) \
 AST_KIND(_TypeBegin, "", bool) \
 	AST_KIND(TypeidType, "typeid", struct { \
@@ -465,25 +492,33 @@ AST_KIND(_TypeBegin, "", bool) \
 		Token token; \
 		Ast *count; \
 		Ast *elem; \
+		Ast *tag;  \
 	}) \
 	AST_KIND(DynamicArrayType, "dynamic array type", struct { \
 		Token token; \
 		Ast *elem; \
+		Ast *tag;  \
 	}) \
 	AST_KIND(StructType, "struct type", struct { \
-		Token token;              \
-		Array<Ast *> fields;      \
-		isize field_count;        \
-		Ast *polymorphic_params;  \
-		Ast *align;               \
-		bool is_packed;           \
-		bool is_raw_union;        \
+		Token token;                \
+		Array<Ast *> fields;        \
+		isize field_count;          \
+		Ast *polymorphic_params;    \
+		Ast *align;                 \
+		Token where_token;          \
+		Array<Ast *> where_clauses; \
+		bool is_packed;             \
+		bool is_raw_union;          \
 	}) \
 	AST_KIND(UnionType, "union type", struct { \
-		Token        token;      \
-		Array<Ast *> variants;   \
-		Ast *polymorphic_params; \
-		Ast *        align;      \
+		Token        token;         \
+		Array<Ast *> variants;      \
+		Ast *polymorphic_params;    \
+		Ast *        align;         \
+		bool         maybe;         \
+		bool         no_nil;        \
+		Token where_token;          \
+		Array<Ast *> where_clauses; \
 	}) \
 	AST_KIND(EnumType, "enum type", struct { \
 		Token        token; \
@@ -539,10 +574,11 @@ isize const ast_variant_sizes[] = {
 
 struct Ast {
 	AstKind      kind;
-	u32          stmt_state_flags;
+	u32          state_flags;
+	u32          viral_state_flags;
+	bool         been_handled;
 	AstFile *    file;
 	Scope *      scope;
-	bool         been_handled;
 	TypeAndValue tav;
 
 	union {

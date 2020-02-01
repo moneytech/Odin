@@ -1,98 +1,31 @@
 package sync
 
-/*
+import "core:sys/unix"
 
-import "core:atomics"
-import "core:os"
-
-Semaphore :: struct {
-	// _handle: win32.Handle,
+// The Darwin docs say it best:
+// A semaphore is much like a lock, except that a finite number of threads can hold it simultaneously.
+// Semaphores can be thought of as being much like piles of tokens; multiple threads can take these tokens, 
+// but when there are none left, a thread must wait until another thread returns one.
+Semaphore :: struct #align 16 {
+	handle: unix.sem_t,
 }
 
-Mutex :: struct {
-	_semaphore: Semaphore,
-	_counter:   i32,
-	_owner:     i32,
-	_recursion: i32,
-}
-
-current_thread_id :: proc() -> i32 {
-	return i32(os.current_thread_id());
-}
-
-semaphore_init :: proc(s: ^Semaphore) {
-	// s._handle = win32.CreateSemaphoreA(nil, 0, 1<<31-1, nil);
+semaphore_init :: proc(s: ^Semaphore, initial_count := 0) {
+	assert(unix.sem_init(&s.handle, 0, u32(initial_count)) == 0);
 }
 
 semaphore_destroy :: proc(s: ^Semaphore) {
-	// win32.CloseHandle(s._handle);
+	assert(unix.sem_destroy(&s.handle) == 0);
+	s.handle = {};
 }
 
-semaphore_post :: proc(s: ^Semaphore, count: int) {
-	// win32.ReleaseSemaphore(s._handle, cast(i32)count, nil);
+semaphore_post :: proc(s: ^Semaphore, count := 1) {
+    // NOTE: SPEED: If there's one syscall to do this, we should use it instead of the loop.
+    for in 0..count-1 {
+	    assert(unix.sem_post(&s.handle) == 0);
+    }
 }
 
-semaphore_release :: inline proc(s: ^Semaphore) {
-	semaphore_post(s, 1);
+semaphore_wait_for :: proc(s: ^Semaphore) {
+	assert(unix.sem_wait(&s.handle) == 0);
 }
-
-semaphore_wait :: proc(s: ^Semaphore) {
-	// win32.WaitForSingleObject(s._handle, win32.INFINITE);
-}
-
-
-mutex_init :: proc(m: ^Mutex) {
-	atomics.store(&m._counter, 0);
-	atomics.store(&m._owner, current_thread_id());
-	semaphore_init(&m._semaphore);
-	m._recursion = 0;
-}
-mutex_destroy :: proc(m: ^Mutex) {
-	semaphore_destroy(&m._semaphore);
-}
-mutex_lock :: proc(m: ^Mutex) {
-	thread_id := current_thread_id();
-	if atomics.fetch_add(&m._counter, 1) > 0 {
-		if thread_id != atomics.load(&m._owner) {
-			semaphore_wait(&m._semaphore);
-		}
-	}
-	atomics.store(&m._owner, thread_id);
-	m._recursion += 1;
-}
-mutex_try_lock :: proc(m: ^Mutex) -> bool {
-	thread_id := current_thread_id();
-	if atomics.load(&m._owner) == thread_id {
-		atomics.fetch_add(&m._counter, 1);
-	} else {
-		expected: i32 = 0;
-		if atomics.load(&m._counter) != 0 {
-			return false;
-		}
-		if atomics.compare_exchange(&m._counter, expected, 1) == 0 {
-			return false;
-		}
-		atomics.store(&m._owner, thread_id);
-	}
-	m._recursion += 1;
-	return true;
-}
-mutex_unlock :: proc(m: ^Mutex) {
-	recursion: i32;
-	thread_id := current_thread_id();
-	assert(thread_id == atomics.load(&m._owner));
-
-	m._recursion -= 1;
-	recursion = m._recursion;
-	if recursion == 0 {
-		atomics.store(&m._owner, thread_id);
-	}
-
-	if atomics.fetch_add(&m._counter, -1) > 1 {
-		if recursion == 0 {
-			semaphore_release(&m._semaphore);
-		}
-	}
-}
-
-*/

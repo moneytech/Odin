@@ -59,213 +59,8 @@ struct BuiltinProc {
 	BuiltinProcPkg pkg;
 };
 
-enum BuiltinProcId {
-	BuiltinProc_Invalid,
 
-	BuiltinProc_len,
-	BuiltinProc_cap,
-
-	BuiltinProc_size_of,
-	BuiltinProc_align_of,
-	BuiltinProc_offset_of,
-	BuiltinProc_type_of,
-	BuiltinProc_type_info_of,
-	BuiltinProc_typeid_of,
-
-	BuiltinProc_swizzle,
-
-	BuiltinProc_complex,
-	BuiltinProc_real,
-	BuiltinProc_imag,
-	BuiltinProc_conj,
-
-	BuiltinProc_expand_to_tuple,
-
-	BuiltinProc_min,
-	BuiltinProc_max,
-	BuiltinProc_abs,
-	BuiltinProc_clamp,
-
-	BuiltinProc_DIRECTIVE, // NOTE(bill): This is used for specialized hash-prefixed procedures
-
-	// "Intrinsics"
-	BuiltinProc_atomic_fence,
-	BuiltinProc_atomic_fence_acq,
-	BuiltinProc_atomic_fence_rel,
-	BuiltinProc_atomic_fence_acqrel,
-
-	BuiltinProc_atomic_store,
-	BuiltinProc_atomic_store_rel,
-	BuiltinProc_atomic_store_relaxed,
-	BuiltinProc_atomic_store_unordered,
-
-	BuiltinProc_atomic_load,
-	BuiltinProc_atomic_load_acq,
-	BuiltinProc_atomic_load_relaxed,
-	BuiltinProc_atomic_load_unordered,
-
-	BuiltinProc_atomic_add,
-	BuiltinProc_atomic_add_acq,
-	BuiltinProc_atomic_add_rel,
-	BuiltinProc_atomic_add_acqrel,
-	BuiltinProc_atomic_add_relaxed,
-	BuiltinProc_atomic_sub,
-	BuiltinProc_atomic_sub_acq,
-	BuiltinProc_atomic_sub_rel,
-	BuiltinProc_atomic_sub_acqrel,
-	BuiltinProc_atomic_sub_relaxed,
-	BuiltinProc_atomic_and,
-	BuiltinProc_atomic_and_acq,
-	BuiltinProc_atomic_and_rel,
-	BuiltinProc_atomic_and_acqrel,
-	BuiltinProc_atomic_and_relaxed,
-	BuiltinProc_atomic_nand,
-	BuiltinProc_atomic_nand_acq,
-	BuiltinProc_atomic_nand_rel,
-	BuiltinProc_atomic_nand_acqrel,
-	BuiltinProc_atomic_nand_relaxed,
-	BuiltinProc_atomic_or,
-	BuiltinProc_atomic_or_acq,
-	BuiltinProc_atomic_or_rel,
-	BuiltinProc_atomic_or_acqrel,
-	BuiltinProc_atomic_or_relaxed,
-	BuiltinProc_atomic_xor,
-	BuiltinProc_atomic_xor_acq,
-	BuiltinProc_atomic_xor_rel,
-	BuiltinProc_atomic_xor_acqrel,
-	BuiltinProc_atomic_xor_relaxed,
-
-	BuiltinProc_atomic_xchg,
-	BuiltinProc_atomic_xchg_acq,
-	BuiltinProc_atomic_xchg_rel,
-	BuiltinProc_atomic_xchg_acqrel,
-	BuiltinProc_atomic_xchg_relaxed,
-
-	BuiltinProc_atomic_cxchg,
-	BuiltinProc_atomic_cxchg_acq,
-	BuiltinProc_atomic_cxchg_rel,
-	BuiltinProc_atomic_cxchg_acqrel,
-	BuiltinProc_atomic_cxchg_relaxed,
-	BuiltinProc_atomic_cxchg_failrelaxed,
-	BuiltinProc_atomic_cxchg_failacq,
-	BuiltinProc_atomic_cxchg_acq_failrelaxed,
-	BuiltinProc_atomic_cxchg_acqrel_failrelaxed,
-
-	BuiltinProc_atomic_cxchgweak,
-	BuiltinProc_atomic_cxchgweak_acq,
-	BuiltinProc_atomic_cxchgweak_rel,
-	BuiltinProc_atomic_cxchgweak_acqrel,
-	BuiltinProc_atomic_cxchgweak_relaxed,
-	BuiltinProc_atomic_cxchgweak_failrelaxed,
-	BuiltinProc_atomic_cxchgweak_failacq,
-	BuiltinProc_atomic_cxchgweak_acq_failrelaxed,
-	BuiltinProc_atomic_cxchgweak_acqrel_failrelaxed,
-
-	BuiltinProc_COUNT,
-};
-gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
-	{STR_LIT(""),                 0, false, Expr_Stmt, BuiltinProcPkg_builtin},
-
-	{STR_LIT("len"),              1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("cap"),              1, false, Expr_Expr, BuiltinProcPkg_builtin},
-
-	{STR_LIT("size_of"),          1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("align_of"),         1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("offset_of"),        2, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("type_of"),          1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("type_info_of"),     1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("typeid_of"),        1, false, Expr_Expr, BuiltinProcPkg_builtin},
-
-	{STR_LIT("swizzle"),          1, true,  Expr_Expr, BuiltinProcPkg_builtin},
-
-	{STR_LIT("complex"),          2, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("real"),             1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("imag"),             1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("conj"),             1, false, Expr_Expr, BuiltinProcPkg_builtin},
-
-	{STR_LIT("expand_to_tuple"),  1, false, Expr_Expr, BuiltinProcPkg_builtin},
-
-	{STR_LIT("min"),              1, true,  Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("max"),              1, true,  Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("abs"),              1, false, Expr_Expr, BuiltinProcPkg_builtin},
-	{STR_LIT("clamp"),            3, false, Expr_Expr, BuiltinProcPkg_builtin},
-
-	{STR_LIT(""),                 0, true,  Expr_Expr, BuiltinProcPkg_builtin}, // DIRECTIVE
-
-
-	// "Intrinsics"
-	{STR_LIT("atomic_fence"),        0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_fence_acq"),    0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_fence_rel"),    0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_fence_acqrel"), 0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-
-	{STR_LIT("atomic_store"),           2, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_store_rel"),       2, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_store_relaxed"),   2, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_store_unordered"), 2, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
-
-	{STR_LIT("atomic_load"),            1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_load_acq"),        1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_load_relaxed"),    1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_load_unordered"),  1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-
-	{STR_LIT("atomic_add"),             2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_add_acq"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_add_rel"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_add_acqrel"),      2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_add_relaxed"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_sub"),             2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_sub_acq"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_sub_rel"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_sub_acqrel"),      2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_sub_relaxed"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_and"),             2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_and_acq"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_and_rel"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_and_acqrel"),      2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_and_relaxed"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_nand"),            2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_nand_acq"),        2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_nand_rel"),        2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_nand_acqrel"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_nand_relaxed"),    2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_or"),              2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_or_acq"),          2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_or_rel"),          2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_or_acqrel"),       2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_or_relaxed"),      2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xor"),             2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xor_acq"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xor_rel"),         2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xor_acqrel"),      2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xor_relaxed"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-
-	{STR_LIT("atomic_xchg"),            2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xchg_acq"),        2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xchg_rel"),        2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xchg_acqrel"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_xchg_relaxed"),    2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-
-	{STR_LIT("atomic_cxchg"),                    3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_acq"),                3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_rel"),                3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_acqrel"),             3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_relaxed"),            3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_failrelaxed"),        3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_failacq"),            3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_acq_failrelaxed"),    3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchg_acqrel_failrelaxed"), 3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-
-	{STR_LIT("atomic_cxchgweak"),                    3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_acq"),                3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_rel"),                3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_acqrel"),             3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_relaxed"),            3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_failrelaxed"),        3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_failacq"),            3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_acq_failrelaxed"),    3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-	{STR_LIT("atomic_cxchgweak_acqrel_failrelaxed"), 3, false, Expr_Expr, BuiltinProcPkg_intrinsics},
-};
+#include "checker_builtin_procs.hpp"
 
 
 // Operand is used as an intermediate value whilst checking
@@ -288,13 +83,30 @@ struct BlockLabel {
 	Ast *label; //  Ast_Label;
 };
 
+enum DeferredProcedureKind {
+	DeferredProcedure_none,
+	DeferredProcedure_in,
+	DeferredProcedure_out,
+};
+struct DeferredProcedure {
+	DeferredProcedureKind kind;
+	Entity *entity;
+};
+
+
 struct AttributeContext {
+	bool    is_export;
+	bool    is_static;
+	bool    require_results;
+	bool    force_foreign_import;
+	bool    has_disabled_proc;
+	bool    disabled_proc;
 	String  link_name;
 	String  link_prefix;
 	isize   init_expr_list_count;
 	String  thread_local_model;
 	String  deprecated_message;
-	Entity *deferred_procedure;
+	DeferredProcedure deferred_procedure;
 };
 
 AttributeContext make_attribute_context(String link_prefix) {
@@ -402,16 +214,23 @@ struct ImportGraphNode {
 	isize              dep_count;
 };
 
+enum EntityVisiblityKind {
+	EntityVisiblity_Public,
+	EntityVisiblity_PrivateToPackage,
+	EntityVisiblity_PrivateToFile,
+};
+
 
 struct ForeignContext {
 	Ast *                 curr_library;
 	ProcCallingConvention default_cc;
 	String                link_prefix;
-	bool                  in_export;
+	EntityVisiblityKind   visibility_kind;
 };
 
 typedef Array<Entity *> CheckerTypePath;
 typedef Array<Type *>   CheckerPolyPath;
+
 
 // CheckerInfo stores all the symbol information for a type-checked program
 struct CheckerInfo {
@@ -438,6 +257,12 @@ struct CheckerInfo {
 	Entity *              entry_point;
 	PtrSet<Entity *>      minimum_dependency_set;
 	PtrSet<isize>         minimum_dependency_type_info_set;
+
+	Array<Entity *>       required_foreign_imports_through_force;
+
+
+	bool allow_identifier_uses;
+	Array<Ast *> identifier_uses; // only used by 'odin query'
 };
 
 struct CheckerContext {
@@ -448,7 +273,7 @@ struct CheckerContext {
 	Scope *        scope;
 	DeclInfo *     decl;
 
-	u32            stmt_state_flags;
+	u32            state_flags;
 	bool           in_defer; // TODO(bill): Actually handle correctly
 	Type *         type_hint;
 
@@ -464,10 +289,14 @@ struct CheckerContext {
 	CheckerPolyPath *poly_path;
 	isize            poly_level; // TODO(bill): Actually handle correctly
 
+#define MAX_INLINE_FOR_DEPTH 1024ll
+	i64 inline_for_depth;
+
 	bool       in_enum_type;
 	bool       collect_delayed_decls;
 	bool       allow_polymorphic_types;
 	bool       no_polymorphic_errors;
+	bool       hide_polymorphic_errors;
 	bool       in_polymorphic_specialization;
 	Scope *    polymorphic_scope;
 };
@@ -479,6 +308,7 @@ struct Checker {
 	Array<ProcInfo> procs_to_check;
 	Array<Entity *> procs_with_deferred_to_check;
 
+	CheckerContext *curr_ctx;
 	gbAllocator    allocator;
 	CheckerContext init_ctx;
 };
@@ -508,7 +338,7 @@ DeclInfo *   decl_info_of_ident     (Ast *ident);
 DeclInfo *   decl_info_of_entity    (Entity * e);
 AstFile *    ast_file_of_filename   (CheckerInfo *i, String   filename);
 // IMPORTANT: Only to use once checking is done
-isize        type_info_index        (CheckerInfo *i, Type *   type, bool error_on_failure = true);
+isize        type_info_index        (CheckerInfo *i, Type *type, bool error_on_failure);
 
 // Will return nullptr if not found
 Entity *entity_of_node(Ast *expr);
@@ -527,7 +357,7 @@ void      add_untyped             (CheckerInfo *i, Ast *expression, bool lhs, Ad
 void      add_type_and_value      (CheckerInfo *i, Ast *expression, AddressingMode mode, Type *type, ExactValue value);
 void      add_entity_use          (CheckerContext *c, Ast *identifier, Entity *entity);
 void      add_implicit_entity     (CheckerContext *c, Ast *node, Entity *e);
-void      add_entity_and_decl_info(CheckerContext *c, Ast *identifier, Entity *e, DeclInfo *d);
+void      add_entity_and_decl_info(CheckerContext *c, Ast *identifier, Entity *e, DeclInfo *d, bool is_exported=true);
 void      add_type_info_type      (CheckerContext *c, Type *t);
 
 void check_add_import_decl(CheckerContext *c, Ast *decl);

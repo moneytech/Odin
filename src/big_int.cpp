@@ -441,7 +441,6 @@ void big_int_add(BigInt *dst, BigInt const *x, BigInt const *y) {
 
 		u64 first_word = dst->d.word;
 		big_int_alloc(dst, 0, gb_max(x->len, y->len)+1);
-		GB_ASSERT(dst->len > 1);
 		dst->d.words[0] = first_word;
 
 		i32 i = 1;
@@ -500,7 +499,7 @@ void big_int_add(BigInt *dst, BigInt const *x, BigInt const *y) {
 			smaller = &neg_abs;
 			break;
 		default:
-			GB_PANIC("Invalid bit_int_cmp value");
+			GB_PANIC("Invalid big_int_cmp value");
 			return;
 		}
 
@@ -531,6 +530,9 @@ void big_int_add(BigInt *dst, BigInt const *x, BigInt const *y) {
 			if (sub_overflow_u64(v, prev_overflow, &v)) {
 				found_word = true;
 				overflow += 1;
+			} else {
+				// IMPORTANT TODO(bill): Is this mathematics correct here?
+				v += overflow;
 			}
 			dst->d.words[i] = v;
 			i += 1;
@@ -1246,15 +1248,15 @@ void big_int_xor(BigInt *dst, BigInt const *x, BigInt const *y) {
 		x = y;
 		y = tmp;
 	}
-
-	// x ^ (-y) == x ^ ~(y-1) == ~(x ^ (y-1)) == -((x ^ (y-1)) + 1)
-
 	dst->neg = false;
-	BigInt y1 = big_int_make_abs(y);
-	big_int_sub_eq(&y1, &BIG_INT_ONE);
-	big_int__xor_abs(dst, x, &y1);
-	big_int_add_eq(dst, &BIG_INT_ONE);
-	dst->neg = true;
+	if (y->neg) {
+		// x ^ (-y) == x ^ ~(y-1) == ~(x ^ (y-1)) == -((x ^ (y-1)) + 1)
+		BigInt y1 = big_int_make_abs(y);
+		big_int_sub_eq(&y1, &BIG_INT_ONE);
+		big_int__xor_abs(dst, x, &y1);
+		big_int_add_eq(dst, &BIG_INT_ONE);
+		dst->neg = true;
+	}
 	return;
 }
 
@@ -1314,13 +1316,15 @@ void big_int_or(BigInt *dst, BigInt const *x, BigInt const *y) {
 		x = y;
 		y = tmp;
 	}
-
-	// x | (-y) == x | ~(y-1) == ~((y-1) &~ x) == -(~((y-1) &~ x) + 1)
-	BigInt y1 = big_int_make_abs(y);
-	big_int_sub_eq(&y1, &BIG_INT_ONE);
-	big_int__and_not_abs(dst, &y1, x);
-	big_int_add_eq(dst, &BIG_INT_ONE);
-	dst->neg = true;
+	dst->neg = false;
+	if (y->neg) {
+		// x | (-y) == x | ~(y-1) == ~((y-1) &~ x) == -(~((y-1) &~ x) + 1)
+		BigInt y1 = big_int_make_abs(y);
+		big_int_sub_eq(&y1, &BIG_INT_ONE);
+		big_int__and_not_abs(dst, &y1, x);
+		big_int_add_eq(dst, &BIG_INT_ONE);
+		dst->neg = true;
+	}
 	return;
 }
 

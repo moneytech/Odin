@@ -25,6 +25,11 @@ void ir_file_buffer_destroy(irFileBuffer *f) {
 
 void ir_file_buffer_write(irFileBuffer *f, void const *data, isize len) {
 	if (len > f->vm.size) {
+		//NOTE(thebirk): Flush the vm data before we print this directly
+		//               otherwise we get out of order printing which is no good
+		gb_file_write(f->output, f->vm.data, f->offset);
+		f->offset = 0;
+
 		gb_file_write(f->output, data, len);
 		return;
 	}
@@ -39,7 +44,7 @@ void ir_file_buffer_write(irFileBuffer *f, void const *data, isize len) {
 }
 
 
-void ir_fprintf(irFileBuffer *f, char *fmt, ...) {
+void ir_fprintf(irFileBuffer *f, char const *fmt, ...) {
 	va_list va;
 	va_start(va, fmt);
 	isize len = gb_snprintf_va(f->buf, IR_FILE_BUFFER_BUF_LEN-1, fmt, va);
@@ -70,21 +75,39 @@ void ir_write_u64(irFileBuffer *f, u64 i) {
 	ir_write_string(f, str);
 }
 void ir_write_big_int(irFileBuffer *f, BigInt const &x, Type *type, bool swap_endian) {
-	i64 i = 0;
-	if (x.neg) {
-		i = big_int_to_i64(&x);
-	} else {
-		i = cast(i64)big_int_to_u64(&x);
-	}
-	if (swap_endian) {
-		i64 size = type_size_of(type);
-		switch (size) {
-		case 2: i = cast(i64)cast(i16)gb_endian_swap16(cast(u16)cast(i16)i); break;
-		case 4: i = cast(i64)cast(i32)gb_endian_swap32(cast(u32)cast(i32)i); break;
-		case 8: i = cast(i64)gb_endian_swap64(cast(u64)i); break;
+	if (x.len == 2) {
+		gbAllocator a = heap_allocator(); // TODO(bill): Change this allocator
+		u64 words[2] = {};
+		BigInt y = x;
+		if (swap_endian) {
+			gb_memmove(words, y.d.words, 16);
+			u8 *bytes = cast(u8 *)words;
+			for (isize i = 0; i < 8; i++) {
+				bytes[i] = bytes[16-i]; // byte swap
+			}
+			y.d.words = words;
 		}
+
+		String s = big_int_to_string(a, &y, 10);
+		ir_write_string(f, s);
+		gb_free(a, s.text);
+	} else {
+		i64 i = 0;
+		if (x.neg) {
+			i = big_int_to_i64(&x);
+		} else {
+			i = cast(i64)big_int_to_u64(&x);
+		}
+		if (swap_endian) {
+			i64 size = type_size_of(type);
+			switch (size) {
+			case 2: i = cast(i64)cast(i16)gb_endian_swap16(cast(u16)cast(i16)i); break;
+			case 4: i = cast(i64)cast(i32)gb_endian_swap32(cast(u32)cast(i32)i); break;
+			case 8: i = cast(i64)gb_endian_swap64(cast(u64)i); break;
+			}
+		}
+		ir_write_i64(f, i);
 	}
-	ir_write_i64(f, i);
 }
 
 void ir_file_write(irFileBuffer *f, void *data, isize len) {
@@ -273,6 +296,8 @@ void ir_print_alignment_prefix_hack(irFileBuffer *f, i64 alignment) {
 
 
 void ir_print_proc_results(irFileBuffer *f, irModule *m, Type *t) {
+	set_procedure_abi_types(heap_allocator(), t);
+
 	GB_ASSERT(is_type_proc(t));
 	t = base_type(t);
 	isize result_count = t->Proc.result_count;
@@ -300,19 +325,25 @@ void ir_print_proc_results(irFileBuffer *f, irModule *m, Type *t) {
 
 
 void ir_print_proc_type_without_pointer(irFileBuffer *f, irModule *m, Type *t) {
+	set_procedure_abi_types(heap_allocator(), t);
+
 	i64 word_bits = 8*build_context.word_size;
 	t = base_type(t);
 	GB_ASSERT(is_type_proc(t));
 
 	isize param_count = t->Proc.param_count;
 	isize result_count = t->Proc.result_count;
+
 	ir_print_proc_results(f, m, t);
 	ir_write_string(f, str_lit(" ("));
 	if (t->Proc.return_by_pointer) {
 		ir_print_type(f, m, reduce_tuple_to_single_type(t->Proc.results));
 		// ir_fprintf(f, "* sret noalias ");
-		ir_write_string(f, str_lit("* noalias "));
-		if (param_count > 0) ir_write_string(f, str_lit(", "));
+		// ir_write_string(f, str_lit("* noalias "));
+		ir_write_string(f, str_lit("*"));
+		if (param_count > 0 || t->Proc.calling_convention == ProcCC_Odin)  {
+			ir_write_string(f, str_lit(", "));
+		}
 	}
 	isize param_index = 0;
 	for (isize i = 0; i < param_count; i++) {
@@ -323,7 +354,22 @@ void ir_print_proc_type_without_pointer(irFileBuffer *f, irModule *m, Type *t) {
 		if (i+1 == param_count && t->Proc.c_vararg) {
 			ir_write_string(f, str_lit("..."));
 		} else {
-			ir_print_type(f, m, t->Proc.abi_compat_params[i]);
+			Type *et = t->Proc.abi_compat_params[i];
+			if (is_type_tuple(et)) {
+				for_array(j, et->Tuple.variables) {
+					if (j > 0) ir_write_str_lit(f, ", ");
+
+					ir_print_type(f, m, et->Tuple.variables[j]->type);
+					if (e->flags&EntityFlag_NoAlias) {
+						ir_write_str_lit(f, " noalias");
+					}
+					ir_write_byte(f, ' ');
+					param_index++;
+				}
+				continue;
+			} else {
+				ir_print_type(f, m, et);
+			}
 		}
 
 		param_index++;
@@ -351,28 +397,34 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 		case Basic_b32:       ir_write_str_lit(f, "i32"); return;
 		case Basic_b64:       ir_write_str_lit(f, "i64"); return;
 
-		case Basic_i8:   ir_write_str_lit(f, "i8");  return;
-		case Basic_u8:   ir_write_str_lit(f, "i8");  return;
-		case Basic_i16:  ir_write_str_lit(f, "i16"); return;
-		case Basic_u16:  ir_write_str_lit(f, "i16"); return;
-		case Basic_i32:  ir_write_str_lit(f, "i32"); return;
-		case Basic_u32:  ir_write_str_lit(f, "i32"); return;
-		case Basic_i64:  ir_write_str_lit(f, "i64"); return;
-		case Basic_u64:  ir_write_str_lit(f, "i64"); return;
+		case Basic_i8:    ir_write_str_lit(f, "i8");   return;
+		case Basic_u8:    ir_write_str_lit(f, "i8");   return;
+		case Basic_i16:   ir_write_str_lit(f, "i16");  return;
+		case Basic_u16:   ir_write_str_lit(f, "i16");  return;
+		case Basic_i32:   ir_write_str_lit(f, "i32");  return;
+		case Basic_u32:   ir_write_str_lit(f, "i32");  return;
+		case Basic_i64:   ir_write_str_lit(f, "i64");  return;
+		case Basic_u64:   ir_write_str_lit(f, "i64");  return;
+		case Basic_i128:  ir_write_str_lit(f, "i128"); return;
+		case Basic_u128:  ir_write_str_lit(f, "i128"); return;
 
-		case Basic_i16le: ir_write_str_lit(f, "i16"); return;
-		case Basic_u16le: ir_write_str_lit(f, "i16"); return;
-		case Basic_i32le: ir_write_str_lit(f, "i32"); return;
-		case Basic_u32le: ir_write_str_lit(f, "i32"); return;
-		case Basic_i64le: ir_write_str_lit(f, "i64"); return;
-		case Basic_u64le: ir_write_str_lit(f, "i64"); return;
+		case Basic_i16le:  ir_write_str_lit(f, "i16");  return;
+		case Basic_u16le:  ir_write_str_lit(f, "i16");  return;
+		case Basic_i32le:  ir_write_str_lit(f, "i32");  return;
+		case Basic_u32le:  ir_write_str_lit(f, "i32");  return;
+		case Basic_i64le:  ir_write_str_lit(f, "i64");  return;
+		case Basic_u64le:  ir_write_str_lit(f, "i64");  return;
+		case Basic_i128le: ir_write_str_lit(f, "i128"); return;
+		case Basic_u128le: ir_write_str_lit(f, "i128"); return;
 
-		case Basic_i16be: ir_write_str_lit(f, "i16"); return;
-		case Basic_u16be: ir_write_str_lit(f, "i16"); return;
-		case Basic_i32be: ir_write_str_lit(f, "i32"); return;
-		case Basic_u32be: ir_write_str_lit(f, "i32"); return;
-		case Basic_i64be: ir_write_str_lit(f, "i64"); return;
-		case Basic_u64be: ir_write_str_lit(f, "i64"); return;
+		case Basic_i16be:  ir_write_str_lit(f, "i16");  return;
+		case Basic_u16be:  ir_write_str_lit(f, "i16");  return;
+		case Basic_i32be:  ir_write_str_lit(f, "i32");  return;
+		case Basic_u32be:  ir_write_str_lit(f, "i32");  return;
+		case Basic_i64be:  ir_write_str_lit(f, "i64");  return;
+		case Basic_u64be:  ir_write_str_lit(f, "i64");  return;
+		case Basic_i128be: ir_write_str_lit(f, "i128"); return;
+		case Basic_u128be: ir_write_str_lit(f, "i128"); return;
 
 		case Basic_rune: ir_write_str_lit(f, "i32"); return;
 
@@ -386,30 +438,34 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 			}
 			return;
 
-		// case Basic_f16:    ir_write_str_lit(f, "half");              return;
-		case Basic_f32:    ir_write_str_lit(f, "float");                return;
-		case Basic_f64:    ir_write_str_lit(f, "double");               return;
+		// case Basic_f16:    ir_write_str_lit(f, "half");                 return;
+		case Basic_f32:    ir_write_str_lit(f, "float");                   return;
+		case Basic_f64:    ir_write_str_lit(f, "double");                  return;
 
-		// case Basic_complex32:  ir_write_str_lit(f, "%%..complex32"); return;
-		case Basic_complex64:  ir_write_str_lit(f, "%..complex64");     return;
-		case Basic_complex128: ir_write_str_lit(f, "%..complex128");    return;
+		// case Basic_complex32:  ir_write_str_lit(f, "%%..complex32");    return;
+		case Basic_complex64:  ir_write_str_lit(f, "%..complex64");        return;
+		case Basic_complex128: ir_write_str_lit(f, "%..complex128");       return;
 
-		case Basic_any:     ir_write_str_lit(f, "%..any");              return;
-		case Basic_rawptr:  ir_write_str_lit(f, "%..rawptr");           return;
-		case Basic_string:  ir_write_str_lit(f, "%..string");           return;
-		case Basic_cstring: ir_write_str_lit(f, "i8*");                 return;
+		case Basic_quaternion128: ir_write_str_lit(f, "%..quaternion128"); return;
+		case Basic_quaternion256: ir_write_str_lit(f, "%..quaternion256"); return;
 
-		case Basic_typeid:  ir_write_str_lit(f, "%..typeid");           return;
+		case Basic_any:     ir_write_str_lit(f, "%..any");                 return;
+		case Basic_rawptr:  ir_write_str_lit(f, "%..rawptr");              return;
+		case Basic_string:  ir_write_str_lit(f, "%..string");              return;
+		case Basic_cstring: ir_write_str_lit(f, "i8*");                    return;
+
+		case Basic_typeid:  ir_write_str_lit(f, "%..typeid");              return;
 		}
 		break;
 
 	case Type_Pointer:
-		if (!is_type_named(t->Pointer.elem) && is_type_empty_struct(t->Pointer.elem)) {
-			ir_print_type(f, m, t_rawptr);
-		} else {
+		// TODO(bill, 2019-12-22): Why did I make add this edge case? Is this some weird LLVM issue?
+		// if (!is_type_named(t->Pointer.elem) && is_type_empty_struct(t->Pointer.elem)) {
+		// 	ir_print_type(f, m, t_rawptr);
+		// } else {
 			ir_print_type(f, m, t->Pointer.elem);
 			ir_write_byte(f, '*');
-		}
+		// }
 		return;
 	case Type_Array:
 		ir_write_byte(f, '[');
@@ -418,6 +474,14 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 		ir_print_type(f, m, t->Array.elem);
 		ir_write_byte(f, ']');
 		return;
+	case Type_EnumeratedArray:
+		ir_write_byte(f, '[');
+		ir_write_i64(f, t->EnumeratedArray.count);
+		ir_write_str_lit(f, " x ");
+		ir_print_type(f, m, t->EnumeratedArray.elem);
+		ir_write_byte(f, ']');
+		return;
+
 	case Type_Slice:
 		ir_write_byte(f, '{');
 		ir_print_type(f, m, t->Slice.elem); ir_write_str_lit(f, "*, ");
@@ -444,13 +508,25 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 			// NOTE(bill): The zero size array is used to fix the alignment used in a structure as
 			// LLVM takes the first element's alignment as the entire alignment (like C)
 			i64 align = type_align_of(t);
+
+			if (is_type_union_maybe_pointer_original_alignment(t)) {
+				ir_write_byte(f, '{');
+				ir_print_type(f, m, t->Union.variants[0]);
+				ir_write_byte(f, '}');
+				return;
+			}
+
 			i64 block_size =  t->Union.variant_block_size;
 
 			ir_write_byte(f, '{');
 			ir_print_alignment_prefix_hack(f, align);
-			ir_fprintf(f, ", [%lld x i8], ", block_size);
-			// ir_print_type(f, m, t_type_info_ptr);
-			ir_print_type(f, m, union_tag_type(t));
+			if (is_type_union_maybe_pointer(t)) {
+				ir_fprintf(f, ", ");
+				ir_print_type(f, m, t->Union.variants[0]);
+			} else {
+				ir_fprintf(f, ", [%lld x i8], ", block_size);
+				ir_print_type(f, m, union_tag_type(t));
+			}
 			ir_write_byte(f, '}');
 		}
 		return;
@@ -463,7 +539,7 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 			i64 align_of_union = type_align_of(t);
 			ir_write_byte(f, '{');
 			ir_print_alignment_prefix_hack(f, align_of_union);
-			ir_fprintf(f, ", [%lld x i8]}", align_of_union, size_of_union);
+			ir_fprintf(f, ", [%lld x i8]}", size_of_union);
 			return;
 		} else {
 			if (t->Struct.is_packed) {
@@ -550,9 +626,9 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 	case Type_BitField: {
 		i64 align = type_align_of(t);
 		i64 size  = type_size_of(t);
-		ir_write_byte(f, '{');
+		ir_write_string(f, str_lit("<{"));
 		ir_print_alignment_prefix_hack(f, align);
-		ir_fprintf(f, ", [%lld x i8]}", size);
+		ir_fprintf(f, ", [%lld x i8]}>", size);
 		break;
 	}
 
@@ -568,6 +644,16 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 
 	case Type_Opaque:
 		ir_print_type(f, m, strip_opaque_type(t));
+		return;
+
+	case Type_SimdVector:
+		if (t->SimdVector.is_x86_mmx) {
+			ir_write_str_lit(f, "x86_mmx");
+		} else {
+			ir_fprintf(f, "<%lld x ", t->SimdVector.count);;
+			ir_print_type(f, m, t->SimdVector.elem);
+			ir_write_byte(f, '>');
+		}
 		return;
 	}
 }
@@ -621,7 +707,21 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 	value = convert_exact_value_for_type(value, type);
 
 	// NOTE(bill): Is this correct? Does this handle all cases regarding arrays?
-	if (is_type_array(type) &&
+	if (is_type_array(type) && value.kind == ExactValue_String && !is_type_u8(core_array_type(type))) {
+		i64 count  = type->Array.count;
+		Type *elem = type->Array.elem;
+		ir_write_byte(f, '[');
+
+		for (i64 i = 0; i < count; i++) {
+			if (i > 0) ir_write_str_lit(f, ", ");
+			ir_print_type(f, m, elem);
+			ir_write_byte(f, ' ');
+			ir_print_exact_value(f, m, value, elem);
+		}
+
+		ir_write_byte(f, ']');
+		return;
+	} else if (is_type_array(type) &&
 	    value.kind != ExactValue_Invalid &&
 	    value.kind != ExactValue_String &&
 	    value.kind != ExactValue_Compound) {
@@ -643,9 +743,9 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 	switch (value.kind) {
 	case ExactValue_Bool:
 		if (value.value_bool) {
-			ir_write_string(f, type == t_llvm_bool ? str_lit("true") : str_lit("1"));
+			ir_write_string(f, are_types_identical(type, t_llvm_bool) ? str_lit("true") : str_lit("1"));
 		} else {
-			ir_write_string(f, type == t_llvm_bool ? str_lit("false") : str_lit("0"));
+			ir_write_string(f, are_types_identical(type, t_llvm_bool) ? str_lit("false") : str_lit("0"));
 		}
 		break;
 	case ExactValue_String: {
@@ -655,7 +755,20 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 			ir_write_str_lit(f, "zeroinitializer");
 			break;
 		}
-		if (!is_type_string(type)) {
+		if (is_type_u8_slice(type)) {
+			irValue *str_array = ir_add_global_string_array(m, str);
+			ir_write_str_lit(f, "{i8* getelementptr inbounds (");
+			ir_print_type(f, m, str_array->Global.entity->type);
+			ir_write_str_lit(f, ", ");
+			ir_print_type(f, m, str_array->Global.entity->type);
+			ir_write_str_lit(f, "* ");
+			ir_print_encoded_global(f, str_array->Global.entity->token.string, false);
+			ir_write_str_lit(f, ", ");
+			ir_print_type(f, m, t_i32);
+			ir_write_str_lit(f, " 0, i32 0), ");
+			ir_print_type(f, m, t_int);
+			ir_fprintf(f, " %lld}", cast(i64)str.len);
+		} else if (!is_type_string(type)) {
 			GB_ASSERT(is_type_array(type));
 			ir_write_str_lit(f, "c\"");
 			ir_print_escape_string(f, str, false, false);
@@ -671,9 +784,9 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 			ir_write_str_lit(f, "* ");
 			ir_print_encoded_global(f, str_array->Global.entity->token.string, false);
 			ir_write_str_lit(f, ", ");
-			ir_print_type(f, m, t_int);
+			ir_print_type(f, m, t_i32);
 			ir_write_str_lit(f, " 0, i32 0)");
-		} else {
+		}else {
 			// HACK NOTE(bill): This is a hack but it works because strings are created at the very end
 			// of the .ll file
 			irValue *str_array = ir_add_global_string_array(m, str);
@@ -684,7 +797,7 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 			ir_write_str_lit(f, "* ");
 			ir_print_encoded_global(f, str_array->Global.entity->token.string, false);
 			ir_write_str_lit(f, ", ");
-			ir_print_type(f, m, t_int);
+			ir_print_type(f, m, t_i32);
 			ir_write_str_lit(f, " 0, i32 0), ");
 			ir_print_type(f, m, t_int);
 			ir_fprintf(f, " %lld}", cast(i64)str.len);
@@ -712,15 +825,17 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 	case ExactValue_Float: {
 		GB_ASSERT_MSG(is_type_float(type), "%s", type_to_string(type));
 		type = core_type(type);
-		u64 u = bit_cast<u64>(value.value_float);
+		u64 u_64 = bit_cast<u64>(value.value_float);
+		u32 u_32 = bit_cast<u32>(cast(f32)value.value_float);
+	#if 0
 		switch (type->Basic.kind) {
 		case Basic_f32:
 			// IMPORTANT NOTE(bill): LLVM requires all floating point constants to be
 			// a 64 bit number if bits_of(float type) <= 64.
 			// https://groups.google.com/forum/#!topic/llvm-dev/IlqV3TbSk6M
-			// 64 bit mantissa: 52 bits
-			// 32 bit mantissa: 23 bits
-			// 16 bit mantissa: 10 bits
+			// 64 bit mantissa: 52 bits ==> 52-52 ==  0
+			// 32 bit mantissa: 23 bits ==> 52-23 == 29
+			// 16 bit mantissa: 10 bits ==> 52=10 == 42
 			// 29 == 52-23
 			u >>= 29;
 			u <<= 29;
@@ -737,9 +852,24 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 			ir_fprintf(f, "0x%016llx", u);
 			break;
 		}
+	#else
+		switch (type->Basic.kind) {
+		case Basic_f32: {
+			ir_fprintf(f, "bitcast (i32 %u to float)", u_32);
+			break;
+		}
+		case Basic_f64:
+			ir_fprintf(f, "0x%016llx", u_64);
+			break;
+		default:
+			ir_fprintf(f, "0x%016llx", u_64);
+			break;
+		}
+	#endif
 		break;
 	}
 	case ExactValue_Complex: {
+		// xy/ri format
 		type = core_type(type);
 		GB_ASSERT_MSG(is_type_complex(type), "%s", type_to_string(type));
 		Type *ft = base_complex_elem_type(type);
@@ -752,6 +882,26 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 		ir_write_byte(f, '}');
 		break;
 	}
+
+	case ExactValue_Quaternion: {
+		// xyzw/ijkr format
+		type = core_type(type);
+		GB_ASSERT_MSG(is_type_quaternion(type), "%s", type_to_string(type));
+		Type *ft = base_complex_elem_type(type);
+		ir_write_byte(f, ' ');
+		ir_write_byte(f, '{');
+		ir_print_type(f, m, ft); ir_write_byte(f, ' ');
+		ir_print_exact_value(f, m, exact_value_float(value.value_quaternion.imag), ft);
+		ir_write_str_lit(f, ", "); ir_print_type(f, m, ft); ir_write_byte(f, ' ');
+		ir_print_exact_value(f, m, exact_value_float(value.value_quaternion.jmag), ft);
+		ir_write_str_lit(f, ", "); ir_print_type(f, m, ft); ir_write_byte(f, ' ');
+		ir_print_exact_value(f, m, exact_value_float(value.value_quaternion.kmag), ft);
+		ir_write_str_lit(f, ", "); ir_print_type(f, m, ft); ir_write_byte(f, ' ');
+		ir_print_exact_value(f, m, exact_value_float(value.value_quaternion.real), ft);
+		ir_write_byte(f, '}');
+		break;
+	}
+
 	case ExactValue_Pointer:
 		if (value.value_pointer == 0) {
 			if (is_type_typeid(type)) {
@@ -781,9 +931,192 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 				ir_write_str_lit(f, "zeroinitializer");
 				break;
 			}
-			GB_ASSERT_MSG(elem_count == type->Array.count, "%td != %td", elem_count, type->Array.count);
+			if (cl->elems[0]->kind == Ast_FieldValue) {
+				// TODO(bill): This is O(N*M) and will be quite slow; it should probably be sorted before hand
+				ir_write_byte(f, '[');
+				for (i64 i = 0; i < type->Array.count; i++) {
+					if (i > 0) ir_write_str_lit(f, ", ");
 
-			ir_write_byte(f, '[');
+					bool found = false;
+
+					for (isize j = 0; j < elem_count; j++) {
+						Ast *elem = cl->elems[j];
+						ast_node(fv, FieldValue, elem);
+						if (is_ast_range(fv->field)) {
+							ast_node(ie, BinaryExpr, fv->field);
+							TypeAndValue lo_tav = ie->left->tav;
+							TypeAndValue hi_tav = ie->right->tav;
+							GB_ASSERT(lo_tav.mode == Addressing_Constant);
+							GB_ASSERT(hi_tav.mode == Addressing_Constant);
+
+							TokenKind op = ie->op.kind;
+							i64 lo = exact_value_to_i64(lo_tav.value);
+							i64 hi = exact_value_to_i64(hi_tav.value);
+							if (op == Token_Ellipsis) {
+								hi += 1;
+							}
+							if (lo == i) {
+								TypeAndValue tav = fv->value->tav;
+								if (tav.mode != Addressing_Constant) {
+									break;
+								}
+								for (i64 k = lo; k < hi; k++) {
+									if (k > lo) ir_write_str_lit(f, ", ");
+
+									ir_print_compound_element(f, m, tav.value, elem_type);
+								}
+
+								found = true;
+								i += (hi-lo-1);
+								break;
+							}
+						} else {
+							TypeAndValue index_tav = fv->field->tav;
+							GB_ASSERT(index_tav.mode == Addressing_Constant);
+							i64 index = exact_value_to_i64(index_tav.value);
+							if (index == i) {
+								TypeAndValue tav = fv->value->tav;
+								if (tav.mode != Addressing_Constant) {
+									break;
+								}
+								ir_print_compound_element(f, m, tav.value, elem_type);
+								found = true;
+								break;
+							}
+						}
+					}
+
+					if (!found) {
+						ir_print_type(f, m, elem_type);
+						ir_write_byte(f, ' ');
+						ir_write_str_lit(f, "zeroinitializer");
+					}
+				}
+				ir_write_byte(f, ']');
+			} else {
+				GB_ASSERT_MSG(elem_count == type->Array.count, "%td != %td", elem_count, type->Array.count);
+
+				ir_write_byte(f, '[');
+
+				for (isize i = 0; i < elem_count; i++) {
+					if (i > 0) ir_write_str_lit(f, ", ");
+					TypeAndValue tav = cl->elems[i]->tav;
+					GB_ASSERT(tav.mode != Addressing_Invalid);
+					ir_print_compound_element(f, m, tav.value, elem_type);
+				}
+				for (isize i = elem_count; i < type->Array.count; i++) {
+					if (i >= elem_count) ir_write_str_lit(f, ", ");
+					ir_print_compound_element(f, m, empty_exact_value, elem_type);
+				}
+
+				ir_write_byte(f, ']');
+			}
+		} else if (is_type_enumerated_array(type)) {
+			ast_node(cl, CompoundLit, value.value_compound);
+
+			Type *index_type = type->EnumeratedArray.elem;
+			Type *elem_type = type->Array.elem;
+			isize elem_count = cl->elems.count;
+			if (elem_count == 0) {
+				ir_write_str_lit(f, "zeroinitializer");
+				break;
+			}
+			if (cl->elems[0]->kind == Ast_FieldValue) {
+				// TODO(bill): This is O(N*M) and will be quite slow; it should probably be sorted before hand
+				ir_write_byte(f, '[');
+
+				i64 total_lo = exact_value_to_i64(type->EnumeratedArray.min_value);
+				i64 total_hi = exact_value_to_i64(type->EnumeratedArray.max_value);
+
+				for (i64 i = total_lo; i <= total_hi; i++) {
+					if (i > total_lo) ir_write_str_lit(f, ", ");
+
+					bool found = false;
+
+					for (isize j = 0; j < elem_count; j++) {
+						Ast *elem = cl->elems[j];
+						ast_node(fv, FieldValue, elem);
+						if (is_ast_range(fv->field)) {
+							ast_node(ie, BinaryExpr, fv->field);
+							TypeAndValue lo_tav = ie->left->tav;
+							TypeAndValue hi_tav = ie->right->tav;
+							GB_ASSERT(lo_tav.mode == Addressing_Constant);
+							GB_ASSERT(hi_tav.mode == Addressing_Constant);
+
+							TokenKind op = ie->op.kind;
+							i64 lo = exact_value_to_i64(lo_tav.value);
+							i64 hi = exact_value_to_i64(hi_tav.value);
+							if (op == Token_Ellipsis) {
+								hi += 1;
+							}
+							if (lo == i) {
+								TypeAndValue tav = fv->value->tav;
+								if (tav.mode != Addressing_Constant) {
+									break;
+								}
+								for (i64 k = lo; k < hi; k++) {
+									if (k > lo) ir_write_str_lit(f, ", ");
+
+									ir_print_compound_element(f, m, tav.value, elem_type);
+								}
+
+								found = true;
+								i += (hi-lo-1);
+								break;
+							}
+						} else {
+							TypeAndValue index_tav = fv->field->tav;
+							GB_ASSERT(index_tav.mode == Addressing_Constant);
+							i64 index = exact_value_to_i64(index_tav.value);
+							if (index == i) {
+								TypeAndValue tav = fv->value->tav;
+								if (tav.mode != Addressing_Constant) {
+									break;
+								}
+								ir_print_compound_element(f, m, tav.value, elem_type);
+								found = true;
+								break;
+							}
+						}
+					}
+
+					if (!found) {
+						ir_print_type(f, m, elem_type);
+						ir_write_byte(f, ' ');
+						ir_write_str_lit(f, "zeroinitializer");
+					}
+				}
+				ir_write_byte(f, ']');
+			} else {
+				GB_ASSERT_MSG(elem_count == type->EnumeratedArray.count, "%td != %td", elem_count, type->EnumeratedArray.count);
+
+				ir_write_byte(f, '[');
+
+				for (isize i = 0; i < elem_count; i++) {
+					if (i > 0) ir_write_str_lit(f, ", ");
+					TypeAndValue tav = cl->elems[i]->tav;
+					GB_ASSERT(tav.mode != Addressing_Invalid);
+					ir_print_compound_element(f, m, tav.value, elem_type);
+				}
+				for (isize i = elem_count; i < type->EnumeratedArray.count; i++) {
+					if (i >= elem_count) ir_write_str_lit(f, ", ");
+					ir_print_compound_element(f, m, empty_exact_value, elem_type);
+				}
+
+				ir_write_byte(f, ']');
+			}
+		} else if (is_type_simd_vector(type)) {
+			ast_node(cl, CompoundLit, value.value_compound);
+
+			Type *elem_type = type->SimdVector.elem;
+			isize elem_count = cl->elems.count;
+			if (elem_count == 0) {
+				ir_write_str_lit(f, "zeroinitializer");
+				break;
+			}
+			GB_ASSERT_MSG(elem_count == type->SimdVector.count, "%td != %td", elem_count, type->SimdVector.count);
+
+			ir_write_byte(f, '<');
 
 			for (isize i = 0; i < elem_count; i++) {
 				if (i > 0) ir_write_str_lit(f, ", ");
@@ -791,12 +1124,12 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 				GB_ASSERT(tav.mode != Addressing_Invalid);
 				ir_print_compound_element(f, m, tav.value, elem_type);
 			}
-			for (isize i = elem_count; i < type->Array.count; i++) {
+			for (isize i = elem_count; i < type->SimdVector.count; i++) {
 				if (i >= elem_count) ir_write_str_lit(f, ", ");
 				ir_print_compound_element(f, m, empty_exact_value, elem_type);
 			}
 
-			ir_write_byte(f, ']');
+			ir_write_byte(f, '>');
 		} else if (is_type_struct(type)) {
 			gbTempArenaMemory tmp = gb_temp_arena_memory_begin(&m->tmp_arena);
 			defer (gb_temp_arena_memory_end(tmp));
@@ -847,7 +1180,8 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 			if (type->Struct.is_packed) ir_write_byte(f, '<');
 			ir_write_byte(f, '{');
 			if (type->Struct.custom_align > 0) {
-				ir_fprintf(f, "[0 x <%lld x i8>] zeroinitializer", cast(i64)type->Struct.custom_align);
+				ir_print_alignment_prefix_hack(f, cast(i64)type->Struct.custom_align);
+				ir_write_str_lit(f, " zeroinitializer");
 				if (value_count > 0) {
 					ir_write_string(f, str_lit(", "));
 				}
@@ -980,9 +1314,7 @@ void ir_print_value(irFileBuffer *f, irModule *m, irValue *value, Type *type_hin
 			ir_print_type(f, m, at);
 			ir_write_str_lit(f, "* ");
 			ir_print_value(f, m, cs->backing_array, at);
-			ir_write_str_lit(f, ", ");
-			ir_print_type(f, m, t_int);
-			ir_write_str_lit(f, " 0, i32 0), ");
+			ir_write_str_lit(f, ", i32 0, i32 0), ");
 			ir_print_type(f, m, t_int);
 			ir_fprintf(f, " %lld}", cs->count);
 		}
@@ -1011,7 +1343,11 @@ void ir_print_value(irFileBuffer *f, irModule *m, irValue *value, Type *type_hin
 		break;
 	}
 	case irValue_Param:
-		ir_print_encoded_local(f, value->Param.entity->token.string);
+		if (value->Param.index >= 0) {
+			ir_fprintf(f, "%%_.%d", value->Param.index);
+		} else {
+			ir_print_encoded_local(f, value->Param.entity->token.string);
+		}
 		break;
 	case irValue_SourceCodeLocation: {
 		irValue *file      = value->SourceCodeLocation.file;
@@ -1046,16 +1382,19 @@ void ir_print_calling_convention(irFileBuffer *f, irModule *m, ProcCallingConven
 	switch (cc) {
 	case ProcCC_Odin:        ir_write_str_lit(f, "");       break;
 	case ProcCC_Contextless: ir_write_str_lit(f, "");       break;
-	case ProcCC_CDecl:       ir_write_str_lit(f, "ccc ");   break;
+	// case ProcCC_CDecl:       ir_write_str_lit(f, "ccc ");   break;
+	case ProcCC_CDecl:       ir_write_str_lit(f, "");   break;
 	case ProcCC_StdCall:     ir_write_str_lit(f, "cc 64 "); break;
 	case ProcCC_FastCall:    ir_write_str_lit(f, "cc 65 "); break;
+	case ProcCC_None:        ir_write_str_lit(f, "");       break;
 	default: GB_PANIC("unknown calling convention: %d", cc);
 	}
 }
 
 void ir_print_context_parameter_prefix(irFileBuffer *f, irModule *m) {
 	ir_print_type(f, m, t_context_ptr);
-	ir_write_str_lit(f, " noalias nonnull nocapture inreg ");
+	// ir_write_str_lit(f, " noalias nonnull nocapture inreg ");
+	ir_write_str_lit(f, " noalias nonnull nocapture ");
 }
 
 void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
@@ -1098,19 +1437,24 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 
 	case irInstr_ZeroInit: {
 		Type *type = type_deref(ir_type(instr->ZeroInit.address));
+		ir_write_str_lit(f, "; ZeroInit\n\t");
 		ir_write_str_lit(f, "store ");
 		ir_print_type(f, m, type);
 		ir_write_byte(f, ' ');
 		ir_print_exact_value(f, m, empty_exact_value, type);
 		ir_write_str_lit(f, ", ");
 		ir_print_type(f, m, type);
-		ir_fprintf(f, "* %%%d", instr->ZeroInit.address->index);
+		ir_fprintf(f, "* %%%d, align 1", instr->ZeroInit.address->index);
+		// ir_fprintf(f, "* %%%d", instr->ZeroInit.address->index);
 		break;
 	}
 
 	case irInstr_Store: {
 		Type *type = type_deref(ir_type(instr->Store.address));
 		ir_write_str_lit(f, "store ");
+		if (instr->Store.is_volatile) {
+			ir_write_str_lit(f, "volatile ");
+		}
 		ir_print_type(f, m, type);
 		ir_write_byte(f, ' ');
 		ir_print_value(f, m, instr->Store.value, type);
@@ -1130,7 +1474,11 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 		ir_print_type(f, m, type);
 		ir_write_str_lit(f, "* ");
 		ir_print_value(f, m, instr->Load.address, type);
-		ir_fprintf(f, ", align %lld", type_align_of(type));
+		if (instr->Load.custom_align > 0) {
+			ir_fprintf(f, ", align %lld", instr->Load.custom_align);
+		} else {
+			ir_fprintf(f, ", align %lld", type_align_of(type));
+		}
 		ir_print_debug_location(f, m, value);
 		break;
 	}
@@ -1412,9 +1760,7 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 		ir_print_type(f, m, et);
 		ir_write_byte(f, ' ');
 		ir_print_value(f, m, instr->ArrayElementPtr.address, et);
-		ir_write_str_lit(f, ", ");
-		ir_print_type(f, m, t_int);
-		ir_write_str_lit(f, " 0, ");
+		ir_write_str_lit(f, ", i32 0, ");
 
 		irValue *index =instr->ArrayElementPtr.elem_index;
 		Type *t = ir_type(index);
@@ -1442,9 +1788,7 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 		ir_print_type(f, m, et);
 		ir_write_byte(f, ' ');
 		ir_print_value(f, m, instr->StructElementPtr.address, et);
-		ir_write_str_lit(f, ", ");
-		ir_print_type(f, m, t_int);
-		ir_write_str_lit(f, " 0, ");
+		ir_write_str_lit(f, ", i32 0, ");
 		ir_print_type(f, m, t_i32);
 		ir_fprintf(f, " %d", index);
 		break;
@@ -1518,6 +1862,12 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 
 	case irInstr_UnionTagPtr: {
 		Type *et = ir_type(instr->UnionTagPtr.address);
+
+		Type *ut = type_deref(et);
+		if (is_type_union_maybe_pointer(ut)) {
+			GB_PANIC("union #maybe UnionTagPtr");
+		}
+
 		ir_fprintf(f, "%%%d = getelementptr inbounds ", value->index);
 		Type *t = base_type(type_deref(et));
 		GB_ASSERT(is_type_union(t));
@@ -1537,9 +1887,15 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 
 	case irInstr_UnionTagValue: {
 		Type *et = ir_type(instr->UnionTagValue.address);
-		ir_fprintf(f, "%%%d = extractvalue ", value->index);
 		Type *t = base_type(et);
+
+		if (is_type_union_maybe_pointer(t)) {
+			GB_PANIC("union #maybe UnionTagValue");
+		}
+
+		ir_fprintf(f, "%%%d = extractvalue ", value->index);
 		GB_ASSERT(is_type_union(t));
+
 
 		ir_print_type(f, m, et);
 		ir_write_byte(f, ' ');
@@ -1660,7 +2016,7 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 	case irInstr_BinaryOp: {
 		irInstrBinaryOp *bo = &value->Instr.BinaryOp;
 		Type *type = base_type(ir_type(bo->left));
-		Type *elem_type = type;
+		Type *elem_type = base_array_type(type);
 
 		ir_fprintf(f, "%%%d = ", value->index);
 
@@ -1757,6 +2113,8 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 		irInstrCall *call = &instr->Call;
 		Type *proc_type = base_type(ir_type(call->value));
 		GB_ASSERT(is_type_proc(proc_type));
+		set_procedure_abi_types(heap_allocator(), proc_type);
+
 		bool is_c_vararg = proc_type->Proc.c_vararg;
 		Type *result_type = call->type;
 		if (result_type) {
@@ -1774,48 +2132,68 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 		ir_write_byte(f, ' ');
 		ir_print_value(f, m, call->value, call->type);
 
+		bool return_by_pointer = proc_type->Proc.return_by_pointer;
+
+		isize param_index = 0;
 
 		ir_write_byte(f, '(');
-		if (proc_type->Proc.return_by_pointer) {
+		if (return_by_pointer) {
 			GB_ASSERT(call->return_ptr != nullptr);
 			ir_print_type(f, m, proc_type->Proc.results);
 			ir_write_str_lit(f, "* ");
 			ir_print_value(f, m, call->return_ptr, ir_type(call->return_ptr));
-			if (call->args.count > 0) {
-				ir_write_str_lit(f, ", ");
-			}
+			param_index += 1;
 		}
 
 
-		isize param_index = 0;
 		if (call->args.count > 0) {
 			TypeTuple *params = &proc_type->Proc.params->Tuple;
 			if (proc_type->Proc.c_vararg) {
 				isize i = 0;
+				isize arg_index = 0;
 				for (; i < params->variables.count-1; i++) {
 					Entity *e = params->variables[i];
 					GB_ASSERT(e != nullptr);
-					if (e->kind != Entity_Variable) continue;
+					if (e->kind != Entity_Variable) {
+						arg_index++;
+						continue;
+					}
 
 					if (param_index > 0) ir_write_str_lit(f, ", ");
 
 					Type *t = proc_type->Proc.abi_compat_params[i];
-					ir_print_type(f, m, t);
-					if (e->flags&EntityFlag_NoAlias) {
-						ir_write_str_lit(f, " noalias");
-					}
-					ir_write_byte(f, ' ');
-					irValue *arg = call->args[i];
-					if (is_type_boolean(t)) {
+					if (is_type_tuple(t)) {
+						for_array(j, t->Tuple.variables) {
+							if (j > 0) ir_write_str_lit(f, ", ");
 
+							irValue *arg = call->args[arg_index++];
+
+							ir_print_type(f, m, t->Tuple.variables[j]->type);
+							if (e->flags&EntityFlag_NoAlias) {
+								ir_write_str_lit(f, " noalias");
+							}
+							ir_write_byte(f, ' ');
+							ir_print_value(f, m, arg, t);
+							param_index++;
+						}
+					} else {
+						ir_print_type(f, m, t);
+						if (e->flags&EntityFlag_NoAlias) {
+							ir_write_str_lit(f, " noalias");
+						}
+						if (e->flags&EntityFlag_ImplicitReference) {
+							ir_write_str_lit(f, " nonnull dereferenceable");
+						}
+						ir_write_byte(f, ' ');
+						irValue *arg = call->args[arg_index++];
+						ir_print_value(f, m, arg, t);
+						param_index++;
 					}
-					ir_print_value(f, m, arg, t);
-					param_index++;
 				}
-				for (; i < call->args.count; i++) {
+				while (arg_index < call->args.count) {
 					if (param_index > 0) ir_write_str_lit(f, ", ");
 
-					irValue *arg = call->args[i];
+					irValue *arg = call->args[arg_index];
 					Type *t = ir_type(arg);
 					ir_print_type(f, m, t);
 					ir_write_byte(f, ' ');
@@ -1823,24 +2201,43 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 					param_index++;
 				}
 			} else {
-				GB_ASSERT(call->args.count == params->variables.count);
+				// GB_ASSERT(call->args.count == params->variables.count);
+				isize arg_index = 0;
 				for_array(i, params->variables) {
 					Entity *e = params->variables[i];
 					GB_ASSERT(e != nullptr);
-					if (e->kind != Entity_Variable) continue;
+					if (e->kind != Entity_Variable) {
+						arg_index++;
+						continue;
+					}
 
 					if (param_index > 0) ir_write_str_lit(f, ", ");
 
-					irValue *arg = call->args[i];
 					Type *t = proc_type->Proc.abi_compat_params[i];
+					if (is_type_tuple(t)) {
+						for_array(j, t->Tuple.variables) {
+							if (j > 0) ir_write_str_lit(f, ", ");
 
-					ir_print_type(f, m, t);
-					if (e->flags&EntityFlag_NoAlias) {
-						ir_write_str_lit(f, " noalias");
+							irValue *arg = call->args[arg_index++];
+
+							ir_print_type(f, m, t->Tuple.variables[j]->type);
+							if (e->flags&EntityFlag_NoAlias) {
+								ir_write_str_lit(f, " noalias");
+							}
+							ir_write_byte(f, ' ');
+							ir_print_value(f, m, arg, t);
+							param_index++;
+						}
+					} else {
+						irValue *arg = call->args[arg_index++];
+						ir_print_type(f, m, t);
+						if (e->flags&EntityFlag_NoAlias) {
+							ir_write_str_lit(f, " noalias");
+						}
+						ir_write_byte(f, ' ');
+						ir_print_value(f, m, arg, t);
+						param_index++;
 					}
-					ir_write_byte(f, ' ');
-					ir_print_value(f, m, arg, t);
-					param_index++;
 				}
 			}
 		}
@@ -1911,6 +2308,8 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 
 
 void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
+	set_procedure_abi_types(heap_allocator(), proc->type);
+
 	if (proc->body == nullptr) {
 		ir_write_str_lit(f, "declare ");
 		// if (proc->tags & ProcTag_dll_import) {
@@ -1946,21 +2345,21 @@ void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
 #endif
 	ir_print_encoded_global(f, proc->name, ir_print_is_proc_global(m, proc));
 
-	ir_write_byte(f, '(');
 
+	isize param_index = 0;
+
+	ir_write_byte(f, '(');
 	if (proc_type->return_by_pointer) {
 		ir_print_type(f, m, reduce_tuple_to_single_type(proc_type->results));
 		ir_write_str_lit(f, "* sret noalias ");
 		ir_write_str_lit(f, "%agg.result");
-		if (param_count > 0) {
-			ir_write_string(f, str_lit(", "));
-		}
+		param_index += 1;
 	}
 
-	isize param_index = 0;
 	if (param_count > 0) {
 		TypeTuple *params = &proc_type->params->Tuple;
-		for (isize i = 0; i < param_count; i++) {
+		isize parameter_index = 0;
+		for (isize i = 0; i < param_count; i++, parameter_index++) {
 			Entity *e = params->variables[i];
 			Type *original_type = e->type;
 			Type *abi_type = proc_type->abi_compat_params[i];
@@ -1970,16 +2369,29 @@ void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
 			if (i+1 == params->variables.count && proc_type->c_vararg) {
 				ir_write_str_lit(f, " ...");
 			} else {
-				ir_print_type(f, m, abi_type);
-				if (e->flags&EntityFlag_NoAlias) {
-					ir_write_str_lit(f, " noalias");
-				}
-				if (proc->body != nullptr) {
-					if (e->token.string != "" && !is_blank_ident(e->token)) {
-						ir_write_byte(f, ' ');
-						ir_print_encoded_local(f, e->token.string);
-					} else {
-						ir_fprintf(f, " %%_.param_%td", i);
+				if (is_type_tuple(abi_type)) {
+					for_array(j, abi_type->Tuple.variables) {
+						if (j > 0) ir_write_string(f, str_lit(", "));
+
+						Type *tft = abi_type->Tuple.variables[j]->type;
+						ir_print_type(f, m, tft);
+						if (e->flags&EntityFlag_NoAlias) {
+							ir_write_str_lit(f, " noalias");
+						}
+
+						if (proc->body != nullptr) {
+							ir_fprintf(f, " %%_.%td", parameter_index+j);
+						}
+					}
+					parameter_index += abi_type->Tuple.variables.count-1;
+					param_index += abi_type->Tuple.variables.count-1;
+				} else {
+					ir_print_type(f, m, abi_type);
+					if (e->flags&EntityFlag_NoAlias) {
+						ir_write_str_lit(f, " noalias");
+					}
+					if (proc->body != nullptr) {
+						ir_fprintf(f, " %%_.%td", parameter_index);
 					}
 				}
 			}
@@ -2093,8 +2505,20 @@ void ir_print_type_name(irFileBuffer *f, irModule *m, irValue *v) {
 	ir_write_byte(f, '\n');
 }
 
-void foo_bar(void) {
+bool ir_print_global_type_allowed(Type *t) {
+	if (t == nullptr) {
+		return true;
+	}
+	t = core_type(t);
+	switch (t->kind) {
+	case Type_DynamicArray:
+	case Type_Map:
+	case Type_Union:
+	case Type_BitField:
+		return false;
+	}
 
+	return true;
 }
 
 void print_llvm_ir(irGen *ir) {
@@ -2105,11 +2529,16 @@ void print_llvm_ir(irGen *ir) {
 	defer (ir_file_buffer_destroy(f));
 
 	i32 word_bits = cast(i32)(8*build_context.word_size);
-	if (build_context.ODIN_OS == "osx" || build_context.ODIN_OS == "macos") {
+	if (build_context.ODIN_OS == "darwin") {
 		GB_ASSERT(word_bits == 64);
-		ir_write_str_lit(f, "target triple = \"x86_64-apple-macosx10.8\"\n\n");
+		ir_write_str_lit(f, "target datalayout = \"e-m:o-i64:64-f80:128-n8:16:32:64-S128\"\n");
+		ir_write_str_lit(f, "target triple = \"x86_64-apple-macosx10.8\"\n");
+		ir_write_str_lit(f, "\n");
 	} else if (build_context.ODIN_OS == "windows") {
 		ir_fprintf(f, "target triple = \"x86%s-pc-windows-msvc\"\n\n", word_bits == 64 ? "_64" : "");
+		if (word_bits == 64 && build_context.metrics.arch == TargetArch_amd64) {
+			ir_fprintf(f, "target datalayout = \"e-m:w-i64:64-f80:128-n8:16:32:64-S128\"\n\n");
+		}
 	}
 
 	ir_print_encoded_local(f, str_lit("..opaque"));
@@ -2127,6 +2556,13 @@ void print_llvm_ir(irGen *ir) {
 	ir_write_str_lit(f, " = type {float, float} ; Basic_complex64\n");
 	ir_print_encoded_local(f, str_lit("..complex128"));
 	ir_write_str_lit(f, " = type {double, double} ; Basic_complex128\n");
+
+	ir_print_encoded_local(f, str_lit("..quaternion64"));
+	ir_write_str_lit(f, " = type {half, half, half, half} ; Basic_quaternion64\n");
+	ir_print_encoded_local(f, str_lit("..quaternion128"));
+	ir_write_str_lit(f, " = type {float, float, float, float} ; Basic_quaternion128\n");
+	ir_print_encoded_local(f, str_lit("..quaternion256"));
+	ir_write_str_lit(f, " = type {double, double, double, double} ; Basic_quaternion256\n");
 
 	ir_print_encoded_local(f, str_lit("..typeid"));
 	ir_write_str_lit(f, " = type ");
@@ -2150,6 +2586,9 @@ void print_llvm_ir(irGen *ir) {
 	}
 	if (map_get(&m->members, hash_string(str_lit("llvm.bswap.i64"))) == nullptr) {
 		ir_write_str_lit(f, "declare i64 @llvm.bswap.i64(i64) \n");
+	}
+	if (map_get(&m->members, hash_string(str_lit("llvm.bswap.i128"))) == nullptr) {
+		ir_write_str_lit(f, "declare i128 @llvm.bswap.i128(i128) \n");
 	}
 	ir_write_byte(f, '\n');
 
@@ -2226,6 +2665,12 @@ void print_llvm_ir(irGen *ir) {
 				ir_write_string(f, str_lit("dllexport "));
 			}
 		}
+
+		if (g->is_private) {
+			ir_write_string(f, str_lit("private "));
+		} else if (g->is_internal) {
+			ir_write_string(f, str_lit("internal "));
+		}
 		if (g->thread_local_model.len > 0) {
 			String model = g->thread_local_model;
 			if (model == "default") {
@@ -2234,12 +2679,6 @@ void print_llvm_ir(irGen *ir) {
 				ir_fprintf(f, "thread_local(%.*s) ", LIT(model));
 
 			}
-		}
-
-		if (g->is_private) {
-			ir_write_string(f, str_lit("private "));
-		} else if (g->is_internal) {
-			ir_write_string(f, str_lit("internal "));
 		}
 		if (g->is_constant) {
 			if (g->is_unnamed_addr) {
@@ -2254,7 +2693,7 @@ void print_llvm_ir(irGen *ir) {
 		ir_print_type(f, m, g->entity->type);
 		ir_write_byte(f, ' ');
 		if (!g->is_foreign) {
-			if (g->value != nullptr) {
+			if (g->value != nullptr && ir_print_global_type_allowed(g->entity->type)) {
 				ir_print_value(f, m, g->value, g->entity->type);
 			} else {
 				ir_write_string(f, str_lit("zeroinitializer"));
@@ -2298,11 +2737,13 @@ void print_llvm_ir(irGen *ir) {
 
 		for_array(di_index, m->debug_info.entries) {
 			irDebugInfo *di = m->debug_info.entries[di_index].value;
+			GB_ASSERT_MSG(di != nullptr, "Invalid irDebugInfo");
 			ir_fprintf(f, "!%d = ", di->id);
-
 			switch (di->kind) {
 			case irDebugInfo_CompileUnit: {
-				irDebugInfo *file = *map_get(&m->debug_info, hash_pointer(di->CompileUnit.file));
+				irDebugInfo **found = map_get(&m->debug_info, hash_pointer(di->CompileUnit.file));
+				GB_ASSERT_MSG(found != nullptr, "Missing debug info for: %.*s\n", LIT(di->CompileUnit.file->fullpath));
+				irDebugInfo *file = *found;
 				ir_fprintf(f,
 				            "distinct !DICompileUnit("
 				              "language: DW_LANG_C_plus_plus" // Is this good enough?

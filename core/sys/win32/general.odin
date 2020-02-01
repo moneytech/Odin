@@ -108,6 +108,8 @@ File_Attribute_Data :: struct {
 	file_size_low:    u32,
 }
 
+// NOTE(Jeroen): The widechar version might want at least the 32k MAX_PATH_WIDE
+// https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-findfirstfilew#parameters
 Find_Data_W :: struct{
     file_attributes:     u32,
     creation_time:       Filetime,
@@ -296,6 +298,41 @@ File_Notify_Information :: struct {
   action:            u32,
   file_name_length:  u32,
   file_name:         [1]u16,
+}
+
+// https://docs.microsoft.com/en-gb/windows/win32/api/sysinfoapi/ns-sysinfoapi-system_info
+System_Info :: struct {
+	using _: struct #raw_union {
+		oem_id: u32,
+		using _: struct #raw_union {
+			processor_architecture: u16,
+			_: u16, // reserved
+		},
+	},
+	page_size: u32,
+	minimum_application_address: rawptr,
+	maximum_application_address: rawptr,
+	active_processor_mask: u32,
+	number_of_processors: u32,
+	processor_type: u32,
+	allocation_granularity: u32,
+	processor_level: u16,
+	processor_revision: u16,
+}
+
+// https://docs.microsoft.com/en-us/windows/desktop/api/winnt/ns-winnt-_osversioninfoexa
+OS_Version_Info_Ex_A :: struct {
+  os_version_info_size: u32,
+  major_version:        u32,
+  minor_version:        u32,
+  build_number:         u32,
+  platform_id :         u32,
+  service_pack_string:  [128]u8,
+  service_pack_major:   u16,
+  service_pack_minor:   u16,
+  suite_mask:           u16,
+  product_type:         u8,
+  reserved:             u8
 }
 
 MAPVK_VK_TO_VSC    :: 0;
@@ -710,19 +747,21 @@ CP_UTF8       :: 65001; // UTF-8 translation
 MB_ERR_INVALID_CHARS :: 8;
 WC_ERR_INVALID_CHARS :: 128;
 
-utf8_to_ucs2 :: proc(s: string, allocator := context.temp_allocator) -> []u16 {
+utf8_to_utf16 :: proc(s: string, allocator := context.temp_allocator) -> []u16 {
 	if len(s) < 1 {
 		return nil;
 	}
 
-	n := multi_byte_to_wide_char(CP_UTF8, MB_ERR_INVALID_CHARS, cstring(&s[0]), i32(len(s)), nil, 0);
+	b := transmute([]byte)s;
+	cstr := cstring(&b[0]);
+	n := multi_byte_to_wide_char(CP_UTF8, MB_ERR_INVALID_CHARS, cstr, i32(len(s)), nil, 0);
 	if n == 0 {
 		return nil;
 	}
 
 	text := make([]u16, n+1, allocator);
 
-	n1 := multi_byte_to_wide_char(CP_UTF8, MB_ERR_INVALID_CHARS, cstring(&s[0]), i32(len(s)), Wstring(&text[0]), i32(n));
+	n1 := multi_byte_to_wide_char(CP_UTF8, MB_ERR_INVALID_CHARS, cstr, i32(len(s)), Wstring(&text[0]), i32(n));
 	if n1 == 0 {
 		delete(text, allocator);
 		return nil;
@@ -733,13 +772,13 @@ utf8_to_ucs2 :: proc(s: string, allocator := context.temp_allocator) -> []u16 {
 	return text[:len(text)-1];
 }
 utf8_to_wstring :: proc(s: string, allocator := context.temp_allocator) -> Wstring {
-	if res := utf8_to_ucs2(s, allocator); res != nil {
+	if res := utf8_to_utf16(s, allocator); res != nil {
 		return Wstring(&res[0]);
 	}
 	return nil;
 }
 
-ucs2_to_utf8 :: proc(s: []u16, allocator := context.temp_allocator) -> string {
+utf16_to_utf8 :: proc(s: []u16, allocator := context.temp_allocator) -> string {
 	if len(s) < 1 {
 		return "";
 	}
@@ -782,6 +821,7 @@ is_key_down :: inline proc(key: Key_Code) -> bool { return get_async_key_state(i
 
 
 MAX_PATH :: 0x00000104;
+MAX_PATH_WIDE :: 0x8000;
 
 HANDLE_FLAG_INHERIT :: 1;
 HANDLE_FLAG_PROTECT_FROM_CLOSE :: 2;

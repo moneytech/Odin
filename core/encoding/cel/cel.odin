@@ -2,8 +2,6 @@ package cel;
 
 import "core:fmt"
 import "core:strconv"
-import "core:os"
-import "core:mem"
 import "core:unicode/utf8"
 import "core:strings"
 
@@ -34,7 +32,7 @@ Parser :: struct {
 
 print_value :: proc(value: Value, pretty := true, indent := 0) {
 	print_indent :: proc(indent: int) {
-		for i in 0..indent-1 do fmt.print("\t");
+		for _ in 0..<indent do fmt.print("\t");
 	}
 
 	switch v in value {
@@ -62,16 +60,16 @@ print_value :: proc(value: Value, pretty := true, indent := 0) {
 		if pretty do fmt.println();
 
 		i := 0;
-		for name, value in v {
+		for name, val in v {
 			if pretty {
 				print_indent(indent+1);
 				fmt.printf("%s = ", name);
-				print_value(value, pretty, indent+1);
+				print_value(val, pretty, indent+1);
 				fmt.println(",");
 			} else {
 				if i > 0 do fmt.print(", ");
 				fmt.printf("%s = ", name);
-				print_value(value, pretty, indent+1);
+				print_value(val, pretty, indent+1);
 				i += 1;
 			}
 		}
@@ -93,7 +91,7 @@ print :: proc(p: ^Parser, pretty := false) {
 }
 
 create_from_string :: proc(src: string) -> (^Parser, bool) {
-	return init(cast([]byte)src);
+	return init(transmute([]byte)src);
 }
 
 
@@ -108,11 +106,11 @@ create_from_tokenizer :: proc(t: ^Tokenizer) -> (^Parser, bool) {
 	p := new(Parser);
 	for {
 		tok := scan(t);
-		if tok.kind == Kind.Illegal {
+		if tok.kind == .Illegal {
 			return p, false;
 		}
 		append(&p.tokens, tok);
-		if tok.kind == Kind.EOF {
+		if tok.kind == .EOF {
 			break;
 		}
 	}
@@ -122,7 +120,7 @@ create_from_tokenizer :: proc(t: ^Tokenizer) -> (^Parser, bool) {
 	}
 
 	if len(p.tokens) == 0 {
-		tok := Token{kind = Kind.EOF};
+		tok := Token{kind = .EOF};
 		tok.line, tok.column = 1, 1;
 		append(&p.tokens, tok);
 		return p, true;
@@ -136,8 +134,8 @@ create_from_tokenizer :: proc(t: ^Tokenizer) -> (^Parser, bool) {
 	p.dict_stack = make([dynamic]^Dict, 0, 4);
 	append(&p.dict_stack, &p.root);
 
-	for p.curr_token.kind != Kind.EOF &&
-	    p.curr_token.kind != Kind.Illegal &&
+	for p.curr_token.kind != .EOF &&
+	    p.curr_token.kind != .Illegal &&
 	    p.curr_token_index < len(p.tokens) {
 		if !parse_assignment(p) {
 			break;
@@ -149,13 +147,13 @@ create_from_tokenizer :: proc(t: ^Tokenizer) -> (^Parser, bool) {
 
 destroy :: proc(p: ^Parser) {
 	destroy_value :: proc(value: Value) {
-		switch v in value {
+		#partial switch v in value {
 		case Array:
 			for elem in v do destroy_value(elem);
 			delete(v);
 
 		case Dict:
-			for key, value in v do destroy_value(value);
+			for _, dv in v do destroy_value(dv);
 			delete(v);
 		}
 	}
@@ -170,9 +168,9 @@ destroy :: proc(p: ^Parser) {
 }
 
 error :: proc(p: ^Parser, pos: Pos, msg: string, args: ..any) {
-	fmt.printf_err("%s(%d:%d) Error: ", pos.file, pos.line, pos.column);
-	fmt.printf_err(msg, ..args);
-	fmt.println_err();
+	fmt.eprintf("%s(%d:%d) Error: ", pos.file, pos.line, pos.column);
+	fmt.eprintf(msg, ..args);
+	fmt.eprintln();
 
 	p.error_count += 1;
 }
@@ -192,7 +190,7 @@ next_token :: proc(p: ^Parser) -> Token {
 	return prev;
 }
 
-unquote_char :: proc(s: string, quote: byte) -> (r: rune, multiple_bytes: bool, tail_string: string, success: bool) {
+unquote_char :: proc(str: string, quote: byte) -> (r: rune, multiple_bytes: bool, tail_string: string, success: bool) {
 	hex_to_int :: proc(c: byte) -> int {
 		switch c {
 		case '0'..'9': return int(c-'0');
@@ -201,19 +199,21 @@ unquote_char :: proc(s: string, quote: byte) -> (r: rune, multiple_bytes: bool, 
 		}
 		return -1;
 	}
+	w: int;
 
-	if s[0] == quote && quote == '"' {
+	if str[0] == quote && quote == '"' {
 		return;
-	} else if s[0] >= 0x80 {
-		r, w := utf8.decode_rune_in_string(s);
-		return r, true, s[w:], true;
-	} else if s[0] != '\\' {
-		return rune(s[0]), false, s[1:], true;
+	} else if str[0] >= 0x80 {
+		r, w = utf8.decode_rune_in_string(str);
+		return r, true, str[w:], true;
+	} else if str[0] != '\\' {
+		return rune(str[0]), false, str[1:], true;
 	}
 
-	if len(s) <= 1 {
+	if len(str) <= 1 {
 		return;
 	}
+	s := str;
 	c := s[1];
 	s = s[2:];
 
@@ -238,7 +238,7 @@ unquote_char :: proc(s: string, quote: byte) -> (r: rune, multiple_bytes: bool, 
 		if len(s) < 2 {
 			return;
 		}
-		for i in 0..len(s)-1 {
+		for i in 0..<len(s) {
 			d := int(s[i]-'0');
 			if d < 0 || d > 7 {
 				return;
@@ -263,7 +263,7 @@ unquote_char :: proc(s: string, quote: byte) -> (r: rune, multiple_bytes: bool, 
 			return;
 		}
 
-		for i in 0..count-1 {
+		for i in 0..<count {
 			d := hex_to_int(s[i]);
 			if d < 0 {
 				return;
@@ -287,11 +287,10 @@ unquote_char :: proc(s: string, quote: byte) -> (r: rune, multiple_bytes: bool, 
 
 
 unquote_string :: proc(p: ^Parser, t: Token) -> (string, bool) {
-	if t.kind != Kind.String {
+	if t.kind != .String {
 		return t.lit, true;
 	}
 	s := t.lit;
-	n := len(s);
 	quote := '"';
 
 	if s == `""` {
@@ -369,8 +368,8 @@ expect_operator :: proc(p: ^Parser) -> Token {
 
 fix_advance :: proc(p: ^Parser) {
 	for {
-		switch t := p.curr_token; t.kind {
-		case Kind.EOF, Kind.Semicolon:
+		#partial switch t := p.curr_token; t.kind {
+		case .EOF, .Semicolon:
 			return;
 		}
 		next_token(p);
@@ -378,7 +377,7 @@ fix_advance :: proc(p: ^Parser) {
 }
 
 copy_value :: proc(value: Value) -> Value {
-	switch v in value {
+	#partial switch v in value {
 	case Array:
 		a := make(Array, len(v));
 		for elem, idx in v {
@@ -408,94 +407,94 @@ lookup_value :: proc(p: ^Parser, name: string) -> (Value, bool) {
 
 parse_operand :: proc(p: ^Parser) -> (Value, Pos) {
 	tok := p.curr_token;
-	switch p.curr_token.kind {
-	case Kind.Ident:
+	#partial switch p.curr_token.kind {
+	case .Ident:
 		next_token(p);
 		v, ok := lookup_value(p, tok.lit);
 		if !ok do error(p, tok.pos, "Undeclared identifier %s", tok.lit);
 		return v, tok.pos;
 
-	case Kind.True:
+	case .True:
 		next_token(p);
 		return true, tok.pos;
-	case Kind.False:
+	case .False:
 		next_token(p);
 		return false, tok.pos;
 
-	case Kind.Nil:
+	case .Nil:
 		next_token(p);
 		return Nil_Value{}, tok.pos;
 
-	case Kind.Integer:
+	case .Integer:
 		next_token(p);
 		return strconv.parse_i64(tok.lit), tok.pos;
 
-	case Kind.Float:
+	case .Float:
 		next_token(p);
 		return strconv.parse_f64(tok.lit), tok.pos;
 
-	case Kind.String:
+	case .String:
 		next_token(p);
 		str, ok := unquote_string(p, tok);
 		if !ok do error(p, tok.pos, "Unable to unquote string");
 		return string(str), tok.pos;
 
-	case Kind.Open_Paren:
-		expect_token(p, Kind.Open_Paren);
-		expr, pos := parse_expr(p);
-		expect_token(p, Kind.Close_Paren);
+	case .Open_Paren:
+		expect_token(p, .Open_Paren);
+		expr, _ := parse_expr(p);
+		expect_token(p, .Close_Paren);
 		return expr, tok.pos;
 
-	case Kind.Open_Bracket:
-		expect_token(p, Kind.Open_Bracket);
+	case .Open_Bracket:
+		expect_token(p, .Open_Bracket);
 		elems := make([dynamic]Value, 0, 4);
-		for p.curr_token.kind != Kind.Close_Bracket &&
-		    p.curr_token.kind != Kind.EOF {
-			elem, pos := parse_expr(p);
+		for p.curr_token.kind != .Close_Bracket &&
+		    p.curr_token.kind != .EOF {
+			elem, _ := parse_expr(p);
 			append(&elems, elem);
 
-			if p.curr_token.kind == Kind.Semicolon && p.curr_token.lit == "\n" {
+			if p.curr_token.kind == .Semicolon && p.curr_token.lit == "\n" {
 				next_token(p);
-			} else if !allow_token(p, Kind.Comma) {
+			} else if !allow_token(p, .Comma) {
 				break;
 			}
 
 		}
-		expect_token(p, Kind.Close_Bracket);
+		expect_token(p, .Close_Bracket);
 		return Array(elems[:]), tok.pos;
 
-	case Kind.Open_Brace:
-		expect_token(p, Kind.Open_Brace);
+	case .Open_Brace:
+		expect_token(p, .Open_Brace);
 
     	dict := Dict{};
     	append(&p.dict_stack, &dict);
     	defer pop(&p.dict_stack);
 
-		for p.curr_token.kind != Kind.Close_Brace &&
-		    p.curr_token.kind != Kind.EOF {
+		for p.curr_token.kind != .Close_Brace &&
+		    p.curr_token.kind != .EOF {
 		    name_tok := p.curr_token;
-		    if !allow_token(p, Kind.Ident) && !allow_token(p, Kind.String) {
-		    	name_tok = expect_token(p, Kind.Ident);
+		    if !allow_token(p, .Ident) && !allow_token(p, .String) {
+		    	name_tok = expect_token(p, .Ident);
 		    }
 
 			name, ok := unquote_string(p, name_tok);
 			if !ok do error(p, tok.pos, "Unable to unquote string");
-		    expect_token(p, Kind.Assign);
-			elem, pos := parse_expr(p);
+		    expect_token(p, .Assign);
+			elem, _ := parse_expr(p);
 
-			if _, ok := dict[name]; ok {
+			if _, ok2 := dict[name]; ok2 {
 				error(p, name_tok.pos, "Previous declaration of %s in this scope", name);
 			} else {
 				dict[name] = elem;
 			}
 
-			if p.curr_token.kind == Kind.Semicolon && p.curr_token.lit == "\n" {
+			if p.curr_token.kind == .Semicolon && p.curr_token.lit == "\n" {
 				next_token(p);
-			} else if !allow_token(p, Kind.Comma) {
+			} else if !allow_token(p, .Comma) {
 				break;
 			}
 		}
-		expect_token(p, Kind.Close_Brace);
+		expect_token(p, .Close_Brace);
 		return dict, tok.pos;
 
 	}
@@ -504,14 +503,14 @@ parse_operand :: proc(p: ^Parser) -> (Value, Pos) {
 
 parse_atom_expr :: proc(p: ^Parser, operand: Value, pos: Pos) -> (Value, Pos) {
 	loop := true;
-	for loop {
-		switch p.curr_token.kind {
-		case Kind.Period:
+	for operand := operand; loop;  {
+		#partial switch p.curr_token.kind {
+		case .Period:
 			next_token(p);
 			tok := next_token(p);
 
-			switch tok.kind {
-			case Kind.Ident:
+			#partial switch tok.kind {
+			case .Ident:
 				d, ok := operand.(Dict);
 				if !ok || d == nil {
 					error(p, tok.pos, "Expected a dictionary");
@@ -532,13 +531,13 @@ parse_atom_expr :: proc(p: ^Parser, operand: Value, pos: Pos) -> (Value, Pos) {
 				operand = nil;
 			}
 
-		case Kind.Open_Bracket:
-			open := expect_token(p, Kind.Open_Bracket);
+		case .Open_Bracket:
+			expect_token(p, .Open_Bracket);
 			index, index_pos := parse_expr(p);
-			close := expect_token(p, Kind.Close_Bracket);
+			expect_token(p, .Close_Bracket);
 
 
-			switch a in operand {
+			#partial switch a in operand {
 			case Array:
 				i, ok := index.(i64);
 				if !ok {
@@ -588,22 +587,22 @@ parse_atom_expr :: proc(p: ^Parser, operand: Value, pos: Pos) -> (Value, Pos) {
 
 parse_unary_expr :: proc(p: ^Parser) -> (Value, Pos) {
 	op := p.curr_token;
-	switch p.curr_token.kind {
-	case Kind.At:
+	#partial switch p.curr_token.kind {
+	case .At:
 		next_token(p);
-		tok := expect_token(p, Kind.String);
+		tok := expect_token(p, .String);
 		v, ok := lookup_value(p, tok.lit);
 		if !ok do error(p, tok.pos, "Undeclared identifier %s", tok.lit);
 		return parse_atom_expr(p, v, tok.pos);
 
-	case Kind.Add, Kind.Sub:
+	case .Add, .Sub:
 		next_token(p);
 		// TODO(bill): Calcuate values as you go!
 		expr, pos := parse_unary_expr(p);
 
-		switch e in expr {
-		case i64: if op.kind == Kind.Sub do return -e, pos;
-		case f64: if op.kind == Kind.Sub do return -e, pos;
+		#partial switch e in expr {
+		case i64: if op.kind == .Sub do return -e, pos;
+		case f64: if op.kind == .Sub do return -e, pos;
 		case:
 			error(p, op.pos, "Unary operator %s can only be used on integers or floats", op.lit);
 			return nil, op.pos;
@@ -611,9 +610,9 @@ parse_unary_expr :: proc(p: ^Parser) -> (Value, Pos) {
 
 		return expr, op.pos;
 
-	case Kind.Not:
+	case .Not:
 		next_token(p);
-		expr, pos := parse_unary_expr(p);
+		expr, _ := parse_unary_expr(p);
 		if v, ok := expr.(bool); ok {
 			return !v, op.pos;
 		}
@@ -626,7 +625,7 @@ parse_unary_expr :: proc(p: ^Parser) -> (Value, Pos) {
 
 
 value_order :: proc(v: Value) -> int {
-	switch _ in v {
+	#partial switch _ in v {
 	case bool, string:
 		return 1;
 	case i64:
@@ -642,13 +641,13 @@ match_values :: proc(left, right: ^Value) -> bool {
 		return match_values(right, left);
 	}
 
-	switch x in left^ {
+	#partial switch x in left^ {
 	case:
 		right^ = left^;
 	case bool, string:
 		return true;
 	case i64:
-		switch y in right^ {
+		#partial switch y in right^ {
 		case i64:
 			return true;
 		case f64:
@@ -657,7 +656,7 @@ match_values :: proc(left, right: ^Value) -> bool {
 		}
 
 	case f64:
-		switch y in right {
+		#partial switch y in right {
 		case f64:
 			return true;
 		}
@@ -666,78 +665,79 @@ match_values :: proc(left, right: ^Value) -> bool {
 	return false;
 }
 
-calculate_binary_value :: proc(p: ^Parser, op: Kind, x, y: Value) -> (Value, bool) {
+calculate_binary_value :: proc(p: ^Parser, op: Kind, a, b: Value) -> (Value, bool) {
 	// TODO(bill): Calculate value as you go!
+	x, y := a, b;
 	match_values(&x, &y);
 
 
-	switch a in x {
+	#partial switch a in x {
 	case: return x, true;
 
 	case bool:
 		b, ok := y.(bool);
 		if !ok do return nil, false;
-		switch op {
-		case Kind.Eq:    return a == b, true;
-		case Kind.NotEq: return a != b, true;
-		case Kind.And:   return a && b, true;
-		case Kind.Or:    return a || b, true;
+		#partial switch op {
+		case .Eq:    return a == b, true;
+		case .NotEq: return a != b, true;
+		case .And:   return a && b, true;
+		case .Or:    return a || b, true;
 		}
 
 	case i64:
 		b, ok := y.(i64);
 		if !ok do return nil, false;
-		switch op {
-		case Kind.Add:   return a + b, true;
-		case Kind.Sub:   return a - b, true;
-		case Kind.Mul:   return a * b, true;
-		case Kind.Quo:   return a / b, true;
-		case Kind.Rem:   return a % b, true;
-		case Kind.Eq:    return a == b, true;
-		case Kind.NotEq: return a != b, true;
-		case Kind.Lt:    return a <  b, true;
-		case Kind.Gt:    return a >  b, true;
-		case Kind.LtEq:  return a <= b, true;
-		case Kind.GtEq:  return a >= b, true;
+		#partial switch op {
+		case .Add:   return a + b, true;
+		case .Sub:   return a - b, true;
+		case .Mul:   return a * b, true;
+		case .Quo:   return a / b, true;
+		case .Rem:   return a % b, true;
+		case .Eq:    return a == b, true;
+		case .NotEq: return a != b, true;
+		case .Lt:    return a <  b, true;
+		case .Gt:    return a >  b, true;
+		case .LtEq:  return a <= b, true;
+		case .GtEq:  return a >= b, true;
 		}
 
 	case f64:
 		b, ok := y.(f64);
 		if !ok do return nil, false;
 
-		switch op {
-		case Kind.Add:   return a + b, true;
-		case Kind.Sub:   return a - b, true;
-		case Kind.Mul:   return a * b, true;
-		case Kind.Quo:   return a / b, true;
-		case Kind.Eq:    return a == b, true;
-		case Kind.NotEq: return a != b, true;
-		case Kind.Lt:    return a <  b, true;
-		case Kind.Gt:    return a >  b, true;
-		case Kind.LtEq:  return a <= b, true;
-		case Kind.GtEq:  return a >= b, true;
+		#partial switch op {
+		case .Add:   return a + b, true;
+		case .Sub:   return a - b, true;
+		case .Mul:   return a * b, true;
+		case .Quo:   return a / b, true;
+		case .Eq:    return a == b, true;
+		case .NotEq: return a != b, true;
+		case .Lt:    return a <  b, true;
+		case .Gt:    return a >  b, true;
+		case .LtEq:  return a <= b, true;
+		case .GtEq:  return a >= b, true;
 		}
 
 	case string:
 		b, ok := y.(string);
 		if !ok do return nil, false;
 
-		switch op {
-		case Kind.Add:
+		#partial switch op {
+		case .Add:
 			n := len(a) + len(b);
 			data := make([]byte, n);
-			copy(data[:], cast([]byte)a);
-			copy(data[len(a):], cast([]byte)b);
+			copy(data[:], a);
+			copy(data[len(a):], b);
 			s := string(data);
 			append(&p.allocated_strings, s);
 			return s, true;
 
-		case Kind.Eq:    return a == b, true;
-		case Kind.NotEq: return a != b, true;
-		case Kind.Lt:    return a <  b, true;
-		case Kind.Gt:    return a >  b, true;
-		case Kind.LtEq:  return a <= b, true;
-		case Kind.GtEq:  return a >= b, true;
+		case .Eq:    return a == b, true;
+		case .NotEq: return a != b, true;
+		case .Lt:    return a <  b, true;
+		case .Gt:    return a >  b, true;
+		case .LtEq:  return a <= b, true;
+		case .GtEq:  return a >= b, true;
 		}
 	}
 
@@ -755,11 +755,11 @@ parse_binary_expr :: proc(p: ^Parser, prec_in: int) -> (Value, Pos) {
 			}
 			expect_operator(p);
 
-			if op.kind == Kind.Question {
+			if op.kind == .Question {
 				cond := expr;
-				x, x_pos := parse_expr(p);
-				expect_token(p, Kind.Colon);
-				y, y_pos := parse_expr(p);
+				x, _ := parse_expr(p);
+				expect_token(p, .Colon);
+				y, _ := parse_expr(p);
 
 				if t, ok := cond.(bool); ok {
 					expr = t ? x : y;
@@ -791,13 +791,13 @@ parse_expr :: proc(p: ^Parser) -> (Value, Pos) {
 expect_semicolon :: proc(p: ^Parser) {
 	kind := p.curr_token.kind;
 
-	switch kind {
-	case Kind.Comma:
+	#partial switch kind {
+	case .Comma:
 		error(p, p.curr_token.pos, "Expected ';', got ','");
 		next_token(p);
-	case Kind.Semicolon:
+	case .Semicolon:
 		next_token(p);
-	case Kind.EOF:
+	case .EOF:
 		// okay
 	case:
 		error(p, p.curr_token.pos, "Expected ';', got %s", p.curr_token.lit);
@@ -811,22 +811,22 @@ parse_assignment :: proc(p: ^Parser) -> bool {
 		return p.dict_stack[len(p.dict_stack)-1];
 	}
 
-	if p.curr_token.kind == Kind.Semicolon {
+	if p.curr_token.kind == .Semicolon {
 		next_token(p);
 		return true;
 	}
-	if p.curr_token.kind == Kind.EOF {
+	if p.curr_token.kind == .EOF {
 		return false;
 	}
 
 	tok := p.curr_token;
-	if allow_token(p, Kind.Ident) || allow_token(p, Kind.String) {
-		expect_token(p, Kind.Assign);
+	if allow_token(p, .Ident) || allow_token(p, .String) {
+		expect_token(p, .Assign);
 		name, ok := unquote_string(p, tok);
 		if !ok do error(p, tok.pos, "Unable to unquote string");
-		expr, pos := parse_expr(p);
+		expr, _ := parse_expr(p);
 		d := top_dict(p);
-		if _, ok := d[name]; ok {
+		if _, ok2 := d[name]; ok2 {
 			error(p, tok.pos, "Previous declaration of %s", name);
 		} else {
 			d[name] = expr;

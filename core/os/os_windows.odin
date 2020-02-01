@@ -65,7 +65,7 @@ is_path_separator :: proc(r: rune) -> bool {
 	return r == '/' || r == '\\';
 }
 
-open :: proc(path: string, mode: int = O_RDONLY, perm: u32 = 0) -> (Handle, Errno) {
+open :: proc(path: string, mode: int = O_RDONLY, perm: int = 0) -> (Handle, Errno) {
 	if len(path) == 0 do return INVALID_HANDLE, ERROR_FILE_NOT_FOUND;
 
 	access: u32;
@@ -210,7 +210,6 @@ get_std_handle :: proc(h: int) -> Handle {
 
 
 
-
 last_write_time :: proc(fd: Handle) -> (File_Time, Errno) {
 	file_info: win32.By_Handle_File_Information;
 	if !win32.get_file_information_by_handle(win32.Handle(fd), &file_info) {
@@ -253,6 +252,18 @@ heap_free :: proc(ptr: rawptr) {
 	win32.heap_free(win32.get_process_heap(), 0, ptr);
 }
 
+get_page_size :: proc() -> int {
+	// NOTE(tetra): The page size never changes, so why do anything complicated
+	// if we don't have to.
+	@static page_size := -1;
+	if page_size != -1 do return page_size;
+
+	info: win32.System_Info;
+	win32.get_system_info(&info);
+	page_size = int(info.page_size);
+	return page_size;
+}
+
 
 exit :: proc(code: int) -> ! {
 	win32.exit_process(u32(code));
@@ -287,4 +298,39 @@ _alloc_command_line_arguments :: proc() -> []string {
 	return arg_list;
 }
 
+get_windows_version_ansi :: proc() -> win32.OS_Version_Info_Ex_A {
+	osvi : win32.OS_Version_Info_Ex_A;
+	osvi.os_version_info_size = size_of(win32.OS_Version_Info_Ex_A);
+    win32.get_version(&osvi);
+    return osvi;
+}
 
+is_windows_xp :: proc() -> bool {
+	osvi := get_windows_version_ansi();
+	return (osvi.major_version == 5 && osvi.minor_version == 1);
+}
+
+is_windows_vista :: proc() -> bool {
+	osvi := get_windows_version_ansi();
+	return (osvi.major_version == 6 && osvi.minor_version == 0);
+}
+
+is_windows_7 :: proc() -> bool {
+	osvi := get_windows_version_ansi();
+	return (osvi.major_version == 6 && osvi.minor_version == 1);
+}
+
+is_windows_8 :: proc() -> bool {
+	osvi := get_windows_version_ansi();
+	return (osvi.major_version == 6 && osvi.minor_version == 2);
+}
+
+is_windows_8_1 :: proc() -> bool {
+	osvi := get_windows_version_ansi();
+	return (osvi.major_version == 6 && osvi.minor_version == 3);
+}
+
+is_windows_10 :: proc() -> bool {
+	osvi := get_windows_version_ansi();
+	return (osvi.major_version == 10 && osvi.minor_version == 0);
+}

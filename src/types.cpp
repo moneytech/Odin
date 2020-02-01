@@ -19,6 +19,8 @@ enum BasicKind {
 	Basic_u32,
 	Basic_i64,
 	Basic_u64,
+	Basic_i128,
+	Basic_u128,
 
 	Basic_rune,
 
@@ -29,6 +31,9 @@ enum BasicKind {
 	// Basic_complex32,
 	Basic_complex64,
 	Basic_complex128,
+
+	Basic_quaternion128,
+	Basic_quaternion256,
 
 	Basic_int,
 	Basic_uint,
@@ -47,6 +52,8 @@ enum BasicKind {
 	Basic_u32le,
 	Basic_i64le,
 	Basic_u64le,
+	Basic_i128le,
+	Basic_u128le,
 
 	Basic_i16be,
 	Basic_u16be,
@@ -54,12 +61,15 @@ enum BasicKind {
 	Basic_u32be,
 	Basic_i64be,
 	Basic_u64be,
+	Basic_i128be,
+	Basic_u128be,
 
 	// Untyped types
 	Basic_UntypedBool,
 	Basic_UntypedInteger,
 	Basic_UntypedFloat,
 	Basic_UntypedComplex,
+	Basic_UntypedQuaternion,
 	Basic_UntypedString,
 	Basic_UntypedRune,
 	Basic_UntypedNil,
@@ -76,17 +86,18 @@ enum BasicFlag {
 	BasicFlag_Unsigned    = GB_BIT(2),
 	BasicFlag_Float       = GB_BIT(3),
 	BasicFlag_Complex     = GB_BIT(4),
-	BasicFlag_Pointer     = GB_BIT(5),
-	BasicFlag_String      = GB_BIT(6),
-	BasicFlag_Rune        = GB_BIT(7),
-	BasicFlag_Untyped     = GB_BIT(8),
+	BasicFlag_Quaternion  = GB_BIT(5),
+	BasicFlag_Pointer     = GB_BIT(6),
+	BasicFlag_String      = GB_BIT(7),
+	BasicFlag_Rune        = GB_BIT(8),
+	BasicFlag_Untyped     = GB_BIT(9),
 
-	BasicFlag_LLVM        = GB_BIT(10),
+	BasicFlag_LLVM        = GB_BIT(11),
 
 	BasicFlag_EndianLittle = GB_BIT(13),
 	BasicFlag_EndianBig    = GB_BIT(14),
 
-	BasicFlag_Numeric        = BasicFlag_Integer | BasicFlag_Float   | BasicFlag_Complex,
+	BasicFlag_Numeric        = BasicFlag_Integer | BasicFlag_Float   | BasicFlag_Complex | BasicFlag_Quaternion,
 	BasicFlag_Ordered        = BasicFlag_Integer | BasicFlag_Float   | BasicFlag_String  | BasicFlag_Pointer | BasicFlag_Rune,
 	BasicFlag_OrderedNumeric = BasicFlag_Integer | BasicFlag_Float   | BasicFlag_Rune,
 	BasicFlag_ConstantType   = BasicFlag_Boolean | BasicFlag_Numeric | BasicFlag_String  | BasicFlag_Pointer | BasicFlag_Rune,
@@ -99,23 +110,36 @@ struct BasicType {
 	String    name;
 };
 
+enum StructSoaKind {
+	StructSoa_None    = 0,
+	StructSoa_Fixed   = 1,
+	StructSoa_Slice   = 2,
+	StructSoa_Dynamic = 3,
+};
+
 struct TypeStruct {
 	Array<Entity *> fields;
-	Ast *node;
-	Scope *  scope;
+	Array<String>   tags;
+	Array<i64>      offsets;
+	Ast *           node;
+	Scope *         scope;
 
-	Array<i64> offsets;
-	bool       are_offsets_set;
-	bool       are_offsets_being_processed;
-	bool       is_packed;
-	bool       is_raw_union;
-	bool       is_polymorphic;
-	bool       is_poly_specialized;
 	Type *     polymorphic_params; // Type_Tuple
 	Type *     polymorphic_parent;
 
-	i64      custom_align; // NOTE(bill): Only used in structs at the moment
+	i64      custom_align;
 	Entity * names;
+
+	bool are_offsets_set;
+	bool are_offsets_being_processed;
+	bool is_packed;
+	bool is_raw_union;
+	bool is_polymorphic;
+	bool is_poly_specialized;
+
+	StructSoaKind soa_kind;
+	Type *        soa_elem;
+	i64           soa_count;
 };
 
 struct TypeUnion {
@@ -125,11 +149,12 @@ struct TypeUnion {
 	i64           variant_block_size;
 	i64           custom_align;
 	i64           tag_size;
-
-	bool       is_polymorphic;
-	bool       is_poly_specialized;
-	Type *     polymorphic_params; // Type_Tuple
-	Type *     polymorphic_parent;
+	Type *        polymorphic_params; // Type_Tuple
+	Type *        polymorphic_parent;
+	bool          no_nil;
+	bool          maybe;
+	bool          is_polymorphic;
+	bool          is_poly_specialized;
 };
 
 #define TYPE_KINDS                                        \
@@ -153,6 +178,14 @@ struct TypeUnion {
 		i64   count;                                      \
 		Type *generic_count;                              \
 	})                                                    \
+	TYPE_KIND(EnumeratedArray, struct {                   \
+		Type *elem;                                       \
+		Type *index;                                      \
+		ExactValue min_value;                             \
+		ExactValue max_value;                             \
+		i64 count;                                        \
+		TokenKind op;                                     \
+	})                                                    \
 	TYPE_KIND(Slice,   struct { Type *elem; })            \
 	TYPE_KIND(DynamicArray, struct { Type *elem; })       \
 	TYPE_KIND(Map, struct {                               \
@@ -173,11 +206,15 @@ struct TypeUnion {
 		Type *   base_type;                               \
 		ExactValue min_value;                             \
 		ExactValue max_value;                             \
+		isize min_value_index;                            \
+		isize max_value_index;                            \
 	})                                                    \
 	TYPE_KIND(Tuple, struct {                             \
 		Array<Entity *> variables; /* Entity_Variable */  \
 		Array<i64>      offsets;                          \
+		bool            are_offsets_being_processed;      \
 		bool            are_offsets_set;                  \
+		bool            is_packed;                        \
 	})                                                    \
 	TYPE_KIND(Proc, struct {                              \
 		Ast *node;                                        \
@@ -188,9 +225,9 @@ struct TypeUnion {
 		i32      result_count;                            \
 		Array<Type *> abi_compat_params;                  \
 		Type *   abi_compat_result_type;                  \
-		bool     return_by_pointer;                       \
-		bool     variadic;                                \
 		i32      variadic_index;                          \
+		bool     variadic;                                \
+		bool     abi_types_set;                           \
 		bool     require_results;                         \
 		bool     c_vararg;                                \
 		bool     is_polymorphic;                          \
@@ -198,6 +235,8 @@ struct TypeUnion {
 		bool     has_proc_default_values;                 \
 		bool     has_named_results;                       \
 		bool     diverging; /* no return */               \
+		bool     return_by_pointer;                       \
+		u64      tags;                                    \
 		isize    specialization_count;                    \
 		ProcCallingConvention calling_convention;         \
 	})                                                    \
@@ -215,6 +254,12 @@ struct TypeUnion {
 		i64   lower;                                      \
 		i64   upper;                                      \
 	})                                                    \
+	TYPE_KIND(SimdVector, struct {                        \
+		i64   count;                                      \
+		Type *elem;                                       \
+		bool is_x86_mmx;                                  \
+	})                                                    \
+
 
 
 
@@ -292,6 +337,22 @@ Selection selection_combine(Selection const &lhs, Selection const &rhs) {
 	return new_sel;
 }
 
+Selection sub_selection(Selection const &sel, isize offset) {
+	Selection res = {};
+	res.index.data = sel.index.data + offset;
+	res.index.count = gb_max(sel.index.count - offset, 0);
+	res.index.capacity = res.index.count;
+	return res;
+}
+
+Selection sub_selection_with_length(Selection const &sel, isize offset, isize len) {
+	Selection res = {};
+	res.index.data = sel.index.data + offset;
+	res.index.count = gb_max(len, gb_max(sel.index.count - offset, 0));
+	res.index.capacity = res.index.count;
+	return res;
+}
+
 
 
 gb_global Type basic_types[] = {
@@ -314,6 +375,9 @@ gb_global Type basic_types[] = {
 	{Type_Basic, {Basic_i64,               BasicFlag_Integer,                          8, STR_LIT("i64")}},
 	{Type_Basic, {Basic_u64,               BasicFlag_Integer | BasicFlag_Unsigned,     8, STR_LIT("u64")}},
 
+	{Type_Basic, {Basic_i128,               BasicFlag_Integer,                        16, STR_LIT("i128")}},
+	{Type_Basic, {Basic_u128,               BasicFlag_Integer | BasicFlag_Unsigned,   16, STR_LIT("u128")}},
+
 	{Type_Basic, {Basic_rune,              BasicFlag_Integer | BasicFlag_Rune,         4, STR_LIT("rune")}},
 
 	// {Type_Basic, {Basic_f16,               BasicFlag_Float,                            2, STR_LIT("f16")}},
@@ -323,6 +387,9 @@ gb_global Type basic_types[] = {
 	// {Type_Basic, {Basic_complex32,         BasicFlag_Complex,                          4, STR_LIT("complex32")}},
 	{Type_Basic, {Basic_complex64,         BasicFlag_Complex,                          8, STR_LIT("complex64")}},
 	{Type_Basic, {Basic_complex128,        BasicFlag_Complex,                         16, STR_LIT("complex128")}},
+
+	{Type_Basic, {Basic_quaternion128,     BasicFlag_Quaternion,                      16, STR_LIT("quaternion128")}},
+	{Type_Basic, {Basic_quaternion256,     BasicFlag_Quaternion,                      32, STR_LIT("quaternion256")}},
 
 	{Type_Basic, {Basic_int,               BasicFlag_Integer,                         -1, STR_LIT("int")}},
 	{Type_Basic, {Basic_uint,              BasicFlag_Integer | BasicFlag_Unsigned,    -1, STR_LIT("uint")}},
@@ -336,25 +403,30 @@ gb_global Type basic_types[] = {
 	{Type_Basic, {Basic_typeid,            0,                                         -1, STR_LIT("typeid")}},
 
 	// Endian
-	{Type_Basic, {Basic_i16le, BasicFlag_Integer |                      BasicFlag_EndianLittle, 2, STR_LIT("i16le")}},
-	{Type_Basic, {Basic_u16le, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle, 2, STR_LIT("u16le")}},
-	{Type_Basic, {Basic_i32le, BasicFlag_Integer |                      BasicFlag_EndianLittle, 4, STR_LIT("i32le")}},
-	{Type_Basic, {Basic_u32le, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle, 4, STR_LIT("u32le")}},
-	{Type_Basic, {Basic_i64le, BasicFlag_Integer |                      BasicFlag_EndianLittle, 8, STR_LIT("i64le")}},
-	{Type_Basic, {Basic_u64le, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle, 8, STR_LIT("u64le")}},
+	{Type_Basic, {Basic_i16le,  BasicFlag_Integer |                      BasicFlag_EndianLittle,  2, STR_LIT("i16le")}},
+	{Type_Basic, {Basic_u16le,  BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle,  2, STR_LIT("u16le")}},
+	{Type_Basic, {Basic_i32le,  BasicFlag_Integer |                      BasicFlag_EndianLittle,  4, STR_LIT("i32le")}},
+	{Type_Basic, {Basic_u32le,  BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle,  4, STR_LIT("u32le")}},
+	{Type_Basic, {Basic_i64le,  BasicFlag_Integer |                      BasicFlag_EndianLittle,  8, STR_LIT("i64le")}},
+	{Type_Basic, {Basic_u64le,  BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle,  8, STR_LIT("u64le")}},
+	{Type_Basic, {Basic_i128le, BasicFlag_Integer                      | BasicFlag_EndianLittle, 16, STR_LIT("i128le")}},
+	{Type_Basic, {Basic_u128le, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianLittle, 16, STR_LIT("u128le")}},
 
-	{Type_Basic, {Basic_i16be, BasicFlag_Integer |                      BasicFlag_EndianBig,    2, STR_LIT("i16be")}},
-	{Type_Basic, {Basic_u16be, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,    2, STR_LIT("u16be")}},
-	{Type_Basic, {Basic_i32be, BasicFlag_Integer |                      BasicFlag_EndianBig,    4, STR_LIT("i32be")}},
-	{Type_Basic, {Basic_u32be, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,    4, STR_LIT("u32be")}},
-	{Type_Basic, {Basic_i64be, BasicFlag_Integer |                      BasicFlag_EndianBig,    8, STR_LIT("i64be")}},
-	{Type_Basic, {Basic_u64be, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,    8, STR_LIT("u64be")}},
+	{Type_Basic, {Basic_i16be,  BasicFlag_Integer |                      BasicFlag_EndianBig,     2, STR_LIT("i16be")}},
+	{Type_Basic, {Basic_u16be,  BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,     2, STR_LIT("u16be")}},
+	{Type_Basic, {Basic_i32be,  BasicFlag_Integer |                      BasicFlag_EndianBig,     4, STR_LIT("i32be")}},
+	{Type_Basic, {Basic_u32be,  BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,     4, STR_LIT("u32be")}},
+	{Type_Basic, {Basic_i64be,  BasicFlag_Integer |                      BasicFlag_EndianBig,     8, STR_LIT("i64be")}},
+	{Type_Basic, {Basic_u64be,  BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,     8, STR_LIT("u64be")}},
+	{Type_Basic, {Basic_i128be, BasicFlag_Integer                      | BasicFlag_EndianBig,    16, STR_LIT("i128be")}},
+	{Type_Basic, {Basic_u128be, BasicFlag_Integer | BasicFlag_Unsigned | BasicFlag_EndianBig,    16, STR_LIT("u128be")}},
 
 	// Untyped types
 	{Type_Basic, {Basic_UntypedBool,       BasicFlag_Boolean    | BasicFlag_Untyped,   0, STR_LIT("untyped bool")}},
 	{Type_Basic, {Basic_UntypedInteger,    BasicFlag_Integer    | BasicFlag_Untyped,   0, STR_LIT("untyped integer")}},
 	{Type_Basic, {Basic_UntypedFloat,      BasicFlag_Float      | BasicFlag_Untyped,   0, STR_LIT("untyped float")}},
 	{Type_Basic, {Basic_UntypedComplex,    BasicFlag_Complex    | BasicFlag_Untyped,   0, STR_LIT("untyped complex")}},
+	{Type_Basic, {Basic_UntypedQuaternion, BasicFlag_Quaternion | BasicFlag_Untyped,   0, STR_LIT("untyped quaternion")}},
 	{Type_Basic, {Basic_UntypedString,     BasicFlag_String     | BasicFlag_Untyped,   0, STR_LIT("untyped string")}},
 	{Type_Basic, {Basic_UntypedRune,       BasicFlag_Integer    | BasicFlag_Untyped,   0, STR_LIT("untyped rune")}},
 	{Type_Basic, {Basic_UntypedNil,        BasicFlag_Untyped,                          0, STR_LIT("untyped nil")}},
@@ -377,6 +449,8 @@ gb_global Type *t_i32             = &basic_types[Basic_i32];
 gb_global Type *t_u32             = &basic_types[Basic_u32];
 gb_global Type *t_i64             = &basic_types[Basic_i64];
 gb_global Type *t_u64             = &basic_types[Basic_u64];
+gb_global Type *t_i128            = &basic_types[Basic_i128];
+gb_global Type *t_u128            = &basic_types[Basic_u128];
 
 gb_global Type *t_rune            = &basic_types[Basic_rune];
 
@@ -387,6 +461,9 @@ gb_global Type *t_f64             = &basic_types[Basic_f64];
 // gb_global Type *t_complex32       = &basic_types[Basic_complex32];
 gb_global Type *t_complex64       = &basic_types[Basic_complex64];
 gb_global Type *t_complex128      = &basic_types[Basic_complex128];
+
+gb_global Type *t_quaternion128   = &basic_types[Basic_quaternion128];
+gb_global Type *t_quaternion256   = &basic_types[Basic_quaternion256];
 
 gb_global Type *t_int             = &basic_types[Basic_int];
 gb_global Type *t_uint            = &basic_types[Basic_uint];
@@ -405,6 +482,8 @@ gb_global Type *t_i32le           = &basic_types[Basic_i32le];
 gb_global Type *t_u32le           = &basic_types[Basic_u32le];
 gb_global Type *t_i64le           = &basic_types[Basic_i64le];
 gb_global Type *t_u64le           = &basic_types[Basic_u64le];
+gb_global Type *t_i128le          = &basic_types[Basic_i128le];
+gb_global Type *t_u128le          = &basic_types[Basic_u128le];
 
 gb_global Type *t_i16be           = &basic_types[Basic_i16be];
 gb_global Type *t_u16be           = &basic_types[Basic_u16be];
@@ -412,11 +491,15 @@ gb_global Type *t_i32be           = &basic_types[Basic_i32be];
 gb_global Type *t_u32be           = &basic_types[Basic_u32be];
 gb_global Type *t_i64be           = &basic_types[Basic_i64be];
 gb_global Type *t_u64be           = &basic_types[Basic_u64be];
+gb_global Type *t_i128be          = &basic_types[Basic_i128be];
+gb_global Type *t_u128be          = &basic_types[Basic_u128be];
+
 
 gb_global Type *t_untyped_bool       = &basic_types[Basic_UntypedBool];
 gb_global Type *t_untyped_integer    = &basic_types[Basic_UntypedInteger];
 gb_global Type *t_untyped_float      = &basic_types[Basic_UntypedFloat];
 gb_global Type *t_untyped_complex    = &basic_types[Basic_UntypedComplex];
+gb_global Type *t_untyped_quaternion = &basic_types[Basic_UntypedQuaternion];
 gb_global Type *t_untyped_string     = &basic_types[Basic_UntypedString];
 gb_global Type *t_untyped_rune       = &basic_types[Basic_UntypedRune];
 gb_global Type *t_untyped_nil        = &basic_types[Basic_UntypedNil];
@@ -433,68 +516,75 @@ gb_global Type *t_string_slice = nullptr;
 
 
 // Type generated for the "preload" file
-gb_global Type *t_type_info                   = nullptr;
-gb_global Type *t_type_info_enum_value        = nullptr;
-gb_global Type *t_type_info_ptr               = nullptr;
-gb_global Type *t_type_info_enum_value_ptr    = nullptr;
+gb_global Type *t_type_info                      = nullptr;
+gb_global Type *t_type_info_enum_value           = nullptr;
+gb_global Type *t_type_info_ptr                  = nullptr;
+gb_global Type *t_type_info_enum_value_ptr       = nullptr;
 
-gb_global Type *t_type_info_named             = nullptr;
-gb_global Type *t_type_info_integer           = nullptr;
-gb_global Type *t_type_info_rune              = nullptr;
-gb_global Type *t_type_info_float             = nullptr;
-gb_global Type *t_type_info_complex           = nullptr;
-gb_global Type *t_type_info_any               = nullptr;
-gb_global Type *t_type_info_typeid            = nullptr;
-gb_global Type *t_type_info_string            = nullptr;
-gb_global Type *t_type_info_boolean           = nullptr;
-gb_global Type *t_type_info_pointer           = nullptr;
-gb_global Type *t_type_info_procedure         = nullptr;
-gb_global Type *t_type_info_array             = nullptr;
-gb_global Type *t_type_info_dynamic_array     = nullptr;
-gb_global Type *t_type_info_slice             = nullptr;
-gb_global Type *t_type_info_tuple             = nullptr;
-gb_global Type *t_type_info_struct            = nullptr;
-gb_global Type *t_type_info_union             = nullptr;
-gb_global Type *t_type_info_enum              = nullptr;
-gb_global Type *t_type_info_map               = nullptr;
-gb_global Type *t_type_info_bit_field         = nullptr;
-gb_global Type *t_type_info_bit_set           = nullptr;
-gb_global Type *t_type_info_opaque            = nullptr;
+gb_global Type *t_type_info_named                = nullptr;
+gb_global Type *t_type_info_integer              = nullptr;
+gb_global Type *t_type_info_rune                 = nullptr;
+gb_global Type *t_type_info_float                = nullptr;
+gb_global Type *t_type_info_complex              = nullptr;
+gb_global Type *t_type_info_quaternion           = nullptr;
+gb_global Type *t_type_info_any                  = nullptr;
+gb_global Type *t_type_info_typeid               = nullptr;
+gb_global Type *t_type_info_string               = nullptr;
+gb_global Type *t_type_info_boolean              = nullptr;
+gb_global Type *t_type_info_pointer              = nullptr;
+gb_global Type *t_type_info_procedure            = nullptr;
+gb_global Type *t_type_info_array                = nullptr;
+gb_global Type *t_type_info_enumerated_array     = nullptr;
+gb_global Type *t_type_info_dynamic_array        = nullptr;
+gb_global Type *t_type_info_slice                = nullptr;
+gb_global Type *t_type_info_tuple                = nullptr;
+gb_global Type *t_type_info_struct               = nullptr;
+gb_global Type *t_type_info_union                = nullptr;
+gb_global Type *t_type_info_enum                 = nullptr;
+gb_global Type *t_type_info_map                  = nullptr;
+gb_global Type *t_type_info_bit_field            = nullptr;
+gb_global Type *t_type_info_bit_set              = nullptr;
+gb_global Type *t_type_info_opaque               = nullptr;
+gb_global Type *t_type_info_simd_vector          = nullptr;
 
-gb_global Type *t_type_info_named_ptr         = nullptr;
-gb_global Type *t_type_info_integer_ptr       = nullptr;
-gb_global Type *t_type_info_rune_ptr          = nullptr;
-gb_global Type *t_type_info_float_ptr         = nullptr;
-gb_global Type *t_type_info_complex_ptr       = nullptr;
-gb_global Type *t_type_info_quaternion_ptr    = nullptr;
-gb_global Type *t_type_info_any_ptr           = nullptr;
-gb_global Type *t_type_info_typeid_ptr        = nullptr;
-gb_global Type *t_type_info_string_ptr        = nullptr;
-gb_global Type *t_type_info_boolean_ptr       = nullptr;
-gb_global Type *t_type_info_pointer_ptr       = nullptr;
-gb_global Type *t_type_info_procedure_ptr     = nullptr;
-gb_global Type *t_type_info_array_ptr         = nullptr;
-gb_global Type *t_type_info_dynamic_array_ptr = nullptr;
-gb_global Type *t_type_info_slice_ptr         = nullptr;
-gb_global Type *t_type_info_tuple_ptr         = nullptr;
-gb_global Type *t_type_info_struct_ptr        = nullptr;
-gb_global Type *t_type_info_union_ptr         = nullptr;
-gb_global Type *t_type_info_enum_ptr          = nullptr;
-gb_global Type *t_type_info_map_ptr           = nullptr;
-gb_global Type *t_type_info_bit_field_ptr     = nullptr;
-gb_global Type *t_type_info_bit_set_ptr       = nullptr;
-gb_global Type *t_type_info_opaque_ptr        = nullptr;
+gb_global Type *t_type_info_named_ptr            = nullptr;
+gb_global Type *t_type_info_integer_ptr          = nullptr;
+gb_global Type *t_type_info_rune_ptr             = nullptr;
+gb_global Type *t_type_info_float_ptr            = nullptr;
+gb_global Type *t_type_info_complex_ptr          = nullptr;
+gb_global Type *t_type_info_quaternion_ptr       = nullptr;
+gb_global Type *t_type_info_any_ptr              = nullptr;
+gb_global Type *t_type_info_typeid_ptr           = nullptr;
+gb_global Type *t_type_info_string_ptr           = nullptr;
+gb_global Type *t_type_info_boolean_ptr          = nullptr;
+gb_global Type *t_type_info_pointer_ptr          = nullptr;
+gb_global Type *t_type_info_procedure_ptr        = nullptr;
+gb_global Type *t_type_info_array_ptr            = nullptr;
+gb_global Type *t_type_info_enumerated_array_ptr = nullptr;
+gb_global Type *t_type_info_dynamic_array_ptr    = nullptr;
+gb_global Type *t_type_info_slice_ptr            = nullptr;
+gb_global Type *t_type_info_tuple_ptr            = nullptr;
+gb_global Type *t_type_info_struct_ptr           = nullptr;
+gb_global Type *t_type_info_union_ptr            = nullptr;
+gb_global Type *t_type_info_enum_ptr             = nullptr;
+gb_global Type *t_type_info_map_ptr              = nullptr;
+gb_global Type *t_type_info_bit_field_ptr        = nullptr;
+gb_global Type *t_type_info_bit_set_ptr          = nullptr;
+gb_global Type *t_type_info_opaque_ptr           = nullptr;
+gb_global Type *t_type_info_simd_vector_ptr      = nullptr;
 
-gb_global Type *t_allocator                   = nullptr;
-gb_global Type *t_allocator_ptr               = nullptr;
-gb_global Type *t_context                     = nullptr;
-gb_global Type *t_context_ptr                 = nullptr;
+gb_global Type *t_allocator                      = nullptr;
+gb_global Type *t_allocator_ptr                  = nullptr;
+gb_global Type *t_context                        = nullptr;
+gb_global Type *t_context_ptr                    = nullptr;
 
-gb_global Type *t_source_code_location        = nullptr;
-gb_global Type *t_source_code_location_ptr    = nullptr;
+gb_global Type *t_source_code_location           = nullptr;
+gb_global Type *t_source_code_location_ptr       = nullptr;
 
-gb_global Type *t_map_key                     = nullptr;
-gb_global Type *t_map_header                  = nullptr;
+gb_global Type *t_map_key                        = nullptr;
+gb_global Type *t_map_header                     = nullptr;
+
+gb_global Type *t_vector_x86_mmx                 = nullptr;
 
 
 
@@ -504,7 +594,26 @@ i64      type_offset_of             (Type *t, i32 index);
 gbString type_to_string             (Type *type);
 void     init_map_internal_types(Type *type);
 Type *   bit_set_to_int(Type *t);
+bool are_types_identical(Type *x, Type *y);
 
+
+bool type_ptr_set_exists(PtrSet<Type *> *s, Type *t) {
+	if (ptr_set_exists(s, t)) {
+		return true;
+	}
+
+	// TODO(bill, 2019-10-05): This is very slow and it's probably a lot
+	// faster to cache types correctly
+	for_array(i, s->entries) {
+		Type *f = s->entries[i].ptr;
+		if (are_types_identical(t, f)) {
+			ptr_set_add(s, t);
+			return true;
+		}
+	}
+
+	return false;
+}
 
 Type *base_type(Type *t) {
 	for (;;) {
@@ -622,6 +731,19 @@ Type *alloc_type_array(Type *elem, i64 count, Type *generic_count = nullptr) {
 	return t;
 }
 
+Type *alloc_type_enumerated_array(Type *elem, Type *index, ExactValue min_value, ExactValue max_value, TokenKind op) {
+	Type *t = alloc_type(Type_EnumeratedArray);
+	t->EnumeratedArray.elem = elem;
+	t->EnumeratedArray.index = index;
+	t->EnumeratedArray.min_value = min_value;
+	t->EnumeratedArray.max_value = max_value;
+	t->EnumeratedArray.op = op;
+
+	t->EnumeratedArray.count = 1 + exact_value_to_i64(exact_value_sub(max_value, min_value));
+	return t;
+}
+
+
 Type *alloc_type_slice(Type *elem) {
 	Type *t = alloc_type(Type_Slice);
 	t->Array.elem = elem;
@@ -722,6 +844,14 @@ Type *alloc_type_bit_set() {
 
 
 
+Type *alloc_type_simd_vector(i64 count, Type *elem) {
+	Type *t = alloc_type(Type_SimdVector);
+	t->SimdVector.count = count;
+	t->SimdVector.elem = elem;
+	return t;
+}
+
+
 
 
 ////////////////////////////////////////////////////////////////
@@ -779,6 +909,14 @@ bool is_type_unsigned(Type *t) {
 	// t = core_type(t);
 	if (t->kind == Type_Basic) {
 		return (t->Basic.flags & BasicFlag_Unsigned) != 0;
+	}
+	return false;
+}
+bool is_type_integer_128bit(Type *t) {
+	// t = core_type(t);
+	t = base_type(t);
+	if (t->kind == Type_Basic) {
+		return (t->Basic.flags & BasicFlag_Integer) != 0 && t->Basic.size == 16;
 	}
 	return false;
 }
@@ -877,6 +1015,13 @@ bool is_type_complex(Type *t) {
 	}
 	return false;
 }
+bool is_type_quaternion(Type *t) {
+	t = core_type(t);
+	if (t->kind == Type_Basic) {
+		return (t->Basic.flags & BasicFlag_Quaternion) != 0;
+	}
+	return false;
+}
 bool is_type_f32(Type *t) {
 	t = core_type(t);
 	if (t->kind == Type_Basic) {
@@ -928,6 +1073,10 @@ bool is_type_array(Type *t) {
 	t = base_type(t);
 	return t->kind == Type_Array;
 }
+bool is_type_enumerated_array(Type *t) {
+	t = base_type(t);
+	return t->kind == Type_EnumeratedArray;
+}
 bool is_type_dynamic_array(Type *t) {
 	t = base_type(t);
 	return t->kind == Type_DynamicArray;
@@ -958,10 +1107,19 @@ bool is_type_poly_proc(Type *t) {
 	t = base_type(t);
 	return t->kind == Type_Proc && t->Proc.is_polymorphic;
 }
+bool is_type_simd_vector(Type *t) {
+	t = base_type(t);
+	return t->kind == Type_SimdVector;
+}
+
 Type *base_array_type(Type *t) {
 	if (is_type_array(t)) {
 		t = base_type(t);
 		return t->Array.elem;
+	}
+	if (is_type_simd_vector(t)) {
+		t = base_type(t);
+		return t->SimdVector.elem;
 	}
 	return t;
 }
@@ -972,23 +1130,52 @@ bool is_type_generic(Type *t) {
 }
 
 
+
 Type *core_array_type(Type *t) {
 	for (;;) {
 		Type *prev = t;
 		t = base_array_type(t);
-		if (prev == t) break;
+		if (t->kind != Type_Array && t->kind != Type_SimdVector) {
+			break;
+		}
 	}
 	return t;
 }
 
+// NOTE(bill): type can be easily compared using memcmp
+bool is_type_simple_compare(Type *t) {
+	t = core_type(t);
+	switch (t->kind) {
+	case Type_Array:
+		return is_type_simple_compare(t->Array.elem);
+
+	case Type_Basic:
+		if (t->Basic.flags & (BasicFlag_Integer|BasicFlag_Float|BasicFlag_Complex|BasicFlag_Rune|BasicFlag_Pointer)) {
+			return true;
+		}
+		return false;
+
+	case Type_Pointer:
+	case Type_Proc:
+	case Type_BitSet:
+	case Type_BitField:
+		return true;
+	}
+
+	return false;
+}
+
 Type *base_complex_elem_type(Type *t) {
 	t = core_type(t);
-	if (is_type_complex(t)) {
+	if (t->kind == Type_Basic) {
 		switch (t->Basic.kind) {
-		// case Basic_complex32:      return t_f16;
-		case Basic_complex64:      return t_f32;
-		case Basic_complex128:     return t_f64;
-		case Basic_UntypedComplex: return t_untyped_float;
+		// case Basic_complex32:         return t_f16;
+		case Basic_complex64:         return t_f32;
+		case Basic_complex128:        return t_f64;
+		case Basic_quaternion128:     return t_f32;
+		case Basic_quaternion256:     return t_f64;
+		case Basic_UntypedComplex:    return t_untyped_float;
+		case Basic_UntypedQuaternion: return t_untyped_float;
 		}
 	}
 	GB_PANIC("Invalid complex type");
@@ -1002,6 +1189,10 @@ bool is_type_struct(Type *t) {
 bool is_type_union(Type *t) {
 	t = base_type(t);
 	return t->kind == Type_Union;
+}
+bool is_type_soa_struct(Type *t) {
+	t = base_type(t);
+	return t->kind == Type_Struct && t->Struct.soa_kind != StructSoa_None;
 }
 
 bool is_type_raw_union(Type *t) {
@@ -1029,6 +1220,32 @@ bool is_type_map(Type *t) {
 	return t->kind == Type_Map;
 }
 
+bool is_type_union_maybe_pointer(Type *t) {
+	t = base_type(t);
+	if (t->kind == Type_Union && t->Union.maybe) {
+		if (t->Union.variants.count == 1) {
+			return is_type_pointer(t->Union.variants[0]);
+		}
+	}
+	return false;
+}
+
+
+bool is_type_union_maybe_pointer_original_alignment(Type *t) {
+	t = base_type(t);
+	if (t->kind == Type_Union && t->Union.maybe) {
+		if (t->Union.variants.count == 1) {
+			Type *v = t->Union.variants[0];
+			if (is_type_pointer(v)) {
+				return type_align_of(v) == type_align_of(t);
+			}
+		}
+	}
+	return false;
+}
+
+
+
 
 bool is_type_integer_endian_big(Type *t) {
 	t = core_type(t);
@@ -1041,11 +1258,12 @@ bool is_type_integer_endian_big(Type *t) {
 		return build_context.endian_kind == TargetEndian_Big;
 	} else if (t->kind == Type_BitSet) {
 		return is_type_integer_endian_big(bit_set_to_int(t));
-	} else {
-		GB_PANIC("Unsupported type: %s", type_to_string(t));
+	} else if (t->kind == Type_Pointer) {
+		return is_type_integer_endian_big(&basic_types[Basic_uintptr]);
 	}
 	return build_context.endian_kind == TargetEndian_Big;
 }
+
 
 bool is_type_integer_endian_little(Type *t) {
 	t = core_type(t);
@@ -1058,11 +1276,26 @@ bool is_type_integer_endian_little(Type *t) {
 		return build_context.endian_kind == TargetEndian_Little;
 	} else if (t->kind == Type_BitSet) {
 		return is_type_integer_endian_little(bit_set_to_int(t));
-	} else {
-		GB_PANIC("Unsupported type: %s", type_to_string(t));
+	} else if (t->kind == Type_Pointer) {
+		return is_type_integer_endian_little(&basic_types[Basic_uintptr]);
 	}
 	return build_context.endian_kind == TargetEndian_Little;
 }
+bool is_type_endian_big(Type *t) {
+	return is_type_integer_endian_big(t);
+}
+bool is_type_endian_little(Type *t) {
+	return is_type_integer_endian_little(t);
+}
+
+bool is_type_dereferenceable(Type *t) {
+	if (is_type_rawptr(t)) {
+		return false;
+	}
+	return is_type_pointer(t);
+}
+
+
 
 bool is_type_different_to_arch_endianness(Type *t) {
 	switch (build_context.endian_kind) {
@@ -1179,14 +1412,34 @@ Type *bit_set_to_int(Type *t) {
 
 	i64 sz = type_size_of(t);
 	switch (sz) {
-	case 0: return t_u8;
-	case 1: return t_u8;
-	case 2: return t_u16;
-	case 4: return t_u32;
-	case 8: return t_u64;
+	case 0:  return t_u8;
+	case 1:  return t_u8;
+	case 2:  return t_u16;
+	case 4:  return t_u32;
+	case 8:  return t_u64;
+	case 16: return t_u128;
 	}
 	GB_PANIC("Unknown bit_set size");
 	return nullptr;
+}
+
+bool is_type_valid_vector_elem(Type *t) {
+	t = base_type(t);
+	if (t->kind == Type_Basic) {
+		if (t->Basic.flags & BasicFlag_EndianLittle) {
+			return false;
+		}
+		if (t->Basic.flags & BasicFlag_EndianBig) {
+			return false;
+		}
+		if (is_type_integer(t)) {
+			return true;
+		}
+		if (is_type_float(t)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 
@@ -1200,6 +1453,23 @@ bool is_type_indexable(Type *t) {
 	case Type_DynamicArray:
 	case Type_Map:
 		return true;
+	case Type_EnumeratedArray:
+		return true;
+	}
+	return false;
+}
+
+bool is_type_sliceable(Type *t) {
+	Type *bt = base_type(t);
+	switch (bt->kind) {
+	case Type_Basic:
+		return bt->Basic.kind == Basic_string;
+	case Type_Array:
+	case Type_Slice:
+	case Type_DynamicArray:
+		return true;
+	case Type_EnumeratedArray:
+		return false;
 	}
 	return false;
 }
@@ -1228,11 +1498,12 @@ Scope *polymorphic_record_parent_scope(Type *t) {
 }
 
 bool is_type_polymorphic_record_specialized(Type *t) {
+	Type *original_type = t;
 	t = base_type(t);
 	if (t->kind == Type_Struct) {
-		return t->Struct.is_polymorphic && t->Struct.is_poly_specialized;
+		return t->Struct.is_poly_specialized;
 	} else if (t->kind == Type_Union) {
-		return t->Union.is_polymorphic && t->Union.is_poly_specialized;
+		return t->Union.is_poly_specialized;
 	}
 	return false;
 }
@@ -1276,6 +1547,12 @@ bool is_type_polymorphic(Type *t, bool or_specialized=false) {
 		return is_type_polymorphic(t->Opaque.elem, or_specialized);
 	case Type_Pointer:
 		return is_type_polymorphic(t->Pointer.elem, or_specialized);
+
+	case Type_EnumeratedArray:
+		if (is_type_polymorphic(t->EnumeratedArray.index, or_specialized)) {
+			return true;
+		}
+		return is_type_polymorphic(t->EnumeratedArray.elem, or_specialized);
 	case Type_Array:
 		if (t->Array.generic_count != nullptr) {
 			return true;
@@ -1389,8 +1666,15 @@ bool type_has_nil(Type *t) {
 	case Type_Map:
 		return true;
 	case Type_Union:
-		return true;
+		return !t->Union.no_nil;
 	case Type_Struct:
+		if (is_type_soa_struct(t)) {
+			switch (t->Struct.soa_kind) {
+			case StructSoa_Fixed:   return false;
+			case StructSoa_Slice:   return true;
+			case StructSoa_Dynamic: return true;
+			}
+		}
 		return false;
 	case Type_Opaque:
 		return true;
@@ -1432,12 +1716,17 @@ bool is_type_comparable(Type *t) {
 		return true;
 	case Type_Enum:
 		return is_type_comparable(core_type(t));
+	case Type_EnumeratedArray:
+		return is_type_comparable(t->EnumeratedArray.elem);
 	case Type_Array:
 		return is_type_comparable(t->Array.elem);
 	case Type_Proc:
 		return true;
 
 	case Type_BitSet:
+		return true;
+
+	case Type_BitFieldValue:
 		return true;
 
 	case Type_Opaque:
@@ -1488,6 +1777,13 @@ bool are_types_identical(Type *x, Type *y) {
 	case Type_Basic:
 		if (y->kind == Type_Basic) {
 			return x->Basic.kind == y->Basic.kind;
+		}
+		break;
+
+	case Type_EnumeratedArray:
+		if (y->kind == Type_EnumeratedArray) {
+			return are_types_identical(x->EnumeratedArray.index, y->EnumeratedArray.index) &&
+			       are_types_identical(x->EnumeratedArray.elem,  y->EnumeratedArray.elem);
 		}
 		break;
 
@@ -1543,7 +1839,8 @@ bool are_types_identical(Type *x, Type *y) {
 	case Type_Union:
 		if (y->kind == Type_Union) {
 			if (x->Union.variants.count == y->Union.variants.count &&
-			    x->Union.custom_align == y->Union.custom_align) {
+			    x->Union.custom_align == y->Union.custom_align &&
+			    x->Union.no_nil == y->Union.no_nil) {
 				// NOTE(bill): zeroth variant is nullptr
 				for_array(i, x->Union.variants) {
 					if (!are_types_identical(x->Union.variants[i], y->Union.variants[i])) {
@@ -1560,7 +1857,10 @@ bool are_types_identical(Type *x, Type *y) {
 			if (x->Struct.is_raw_union == y->Struct.is_raw_union &&
 			    x->Struct.fields.count == y->Struct.fields.count &&
 			    x->Struct.is_packed    == y->Struct.is_packed &&
-			    x->Struct.custom_align == y->Struct.custom_align) {
+			    x->Struct.custom_align == y->Struct.custom_align &&
+			    x->Struct.soa_kind == y->Struct.soa_kind &&
+			    x->Struct.soa_count == y->Struct.soa_count &&
+			    are_types_identical(x->Struct.soa_elem, y->Struct.soa_elem)) {
 				// TODO(bill); Fix the custom alignment rule
 				for_array(i, x->Struct.fields) {
 					Entity *xf = x->Struct.fields[i];
@@ -1577,6 +1877,12 @@ bool are_types_identical(Type *x, Type *y) {
 					bool xf_is_using = (xf->flags&EntityFlag_Using) != 0;
 					bool yf_is_using = (yf->flags&EntityFlag_Using) != 0;
 					if (xf_is_using ^ yf_is_using) {
+						return false;
+					}
+					if (x->Struct.tags.count != y->Struct.tags.count) {
+						return false;
+					}
+					if (x->Struct.tags.count > 0 && x->Struct.tags[i] != y->Struct.tags[i]) {
 						return false;
 					}
 				}
@@ -1599,7 +1905,8 @@ bool are_types_identical(Type *x, Type *y) {
 
 	case Type_Tuple:
 		if (y->kind == Type_Tuple) {
-			if (x->Tuple.variables.count == y->Tuple.variables.count) {
+			if (x->Tuple.variables.count == y->Tuple.variables.count &&
+			    x->Tuple.is_packed == y->Tuple.is_packed) {
 				for_array(i, x->Tuple.variables) {
 					Entity *xe = x->Tuple.variables[i];
 					Entity *ye = y->Tuple.variables[i];
@@ -1631,6 +1938,18 @@ bool are_types_identical(Type *x, Type *y) {
 		if (y->kind == Type_Map) {
 			return are_types_identical(x->Map.key,   y->Map.key) &&
 			       are_types_identical(x->Map.value, y->Map.value);
+		}
+		break;
+
+	case Type_SimdVector:
+		if (y->kind == Type_SimdVector) {
+			if (x->SimdVector.is_x86_mmx == y->SimdVector.is_x86_mmx) {
+				if (x->SimdVector.is_x86_mmx) {
+					return true;
+				} else if (x->SimdVector.count == y->SimdVector.count) {
+					return are_types_identical(x->SimdVector.elem, y->SimdVector.elem);
+				}
+			}
 		}
 		break;
 	}
@@ -1667,6 +1986,7 @@ Type *default_type(Type *type) {
 		case Basic_UntypedInteger:    return t_int;
 		case Basic_UntypedFloat:      return t_f64;
 		case Basic_UntypedComplex:    return t_complex128;
+		case Basic_UntypedQuaternion: return t_quaternion256;
 		case Basic_UntypedString:     return t_string;
 		case Basic_UntypedRune:       return t_rune;
 		}
@@ -1677,65 +1997,6 @@ Type *default_type(Type *type) {
 	return type;
 }
 
-/*
-// NOTE(bill): Valid Compile time execution #run type
-bool is_type_cte_safe(Type *type) {
-	type = default_type(base_type(type));
-	switch (type->kind) {
-	case Type_Basic:
-		switch (type->Basic.kind) {
-		case Basic_rawptr:
-		case Basic_any:
-			return false;
-		}
-		return true;
-
-	case Type_Pointer:
-		return false;
-
-	case Type_Array:
-		return is_type_cte_safe(type->Array.elem);
-
-	case Type_DynamicArray:
-		return false;
-	case Type_Map:
-		return false;
-
-	case Type_Slice:
-		return false;
-
-	case Type_Struct: {
-		if (type->Struct.is_raw_union) {
-			return false;
-		}
-		for_array(i, type->Struct.fields) {
-			Entity *v = type->Struct.fields[i];
-			if (!is_type_cte_safe(v->type)) {
-				return false;
-			}
-		}
-		return true;
-	}
-
-	case Type_Tuple: {
-		for_array(i, type->Tuple.variables) {
-			Entity *v = type->Tuple.variables[i];
-			if (!is_type_cte_safe(v->type)) {
-				return false;
-			}
-		}
-		return true;
-	}
-
-	case Type_Proc:
-		// TODO(bill): How should I handle procedures in the CTE stage?
-		// return type->Proc.calling_convention == ProcCC_Odin;
-		return false;
-	}
-
-	return false;
-}
- */
 i64 union_variant_index(Type *u, Type *v) {
 	u = base_type(u);
 	GB_ASSERT(u->kind == Type_Union);
@@ -1743,7 +2004,11 @@ i64 union_variant_index(Type *u, Type *v) {
 	for_array(i, u->Union.variants) {
 		Type *vt = u->Union.variants[i];
 		if (are_types_identical(v, vt)) {
-			return cast(i64)(i+1);
+			if (u->Union.no_nil) {
+				return cast(i64)(i+0);
+			} else {
+				return cast(i64)(i+1);
+			}
 		}
 	}
 	return 0;
@@ -1786,6 +2051,7 @@ i64 union_tag_size(Type *u) {
 Type *union_tag_type(Type *u) {
 	i64 s = union_tag_size(u);
 	switch (s) {
+	case  0: return  t_u8;
 	case  1: return  t_u8;
 	case  2: return  t_u16;
 	case  4: return  t_u32;
@@ -2046,6 +2312,19 @@ Selection lookup_field_with_selection(Type *type_, String field_name, bool is_ty
 				sel.index.count = prev_count;
 			}
 		}
+
+		bool is_soa = type->Struct.soa_kind != StructSoa_None;
+		bool is_soa_of_array = is_soa && is_type_array(type->Struct.soa_elem);
+
+		if (is_soa_of_array) {
+			String mapped_field_name = {};
+			     if (field_name == "r") mapped_field_name = str_lit("x");
+			else if (field_name == "g") mapped_field_name = str_lit("y");
+			else if (field_name == "b") mapped_field_name = str_lit("z");
+			else if (field_name == "a") mapped_field_name = str_lit("w");
+			return lookup_field_with_selection(type, mapped_field_name, is_type, sel, allow_blank_ident);
+		}
+
 	} else if (type->kind == Type_BitField) {
 		for_array(i, type->BitField.fields) {
 			Entity *f = type->BitField.fields[i];
@@ -2083,6 +2362,94 @@ Selection lookup_field_with_selection(Type *type_, String field_name, bool is_ty
 			}
 		#endif
 		} break;
+
+		case Basic_quaternion128: {
+			// @QuaternionLayout
+			gb_local_persist String w = str_lit("w");
+			gb_local_persist String x = str_lit("x");
+			gb_local_persist String y = str_lit("y");
+			gb_local_persist String z = str_lit("z");
+			gb_local_persist Entity *entity__w = alloc_entity_field(nullptr, make_token_ident(w), t_f32, false, 3);
+			gb_local_persist Entity *entity__x = alloc_entity_field(nullptr, make_token_ident(x), t_f32, false, 0);
+			gb_local_persist Entity *entity__y = alloc_entity_field(nullptr, make_token_ident(y), t_f32, false, 1);
+			gb_local_persist Entity *entity__z = alloc_entity_field(nullptr, make_token_ident(z), t_f32, false, 2);
+			if (field_name == w) {
+				selection_add_index(&sel, 3);
+				sel.entity = entity__w;
+				return sel;
+			} else if (field_name == x) {
+				selection_add_index(&sel, 0);
+				sel.entity = entity__x;
+				return sel;
+			} else if (field_name == y) {
+				selection_add_index(&sel, 1);
+				sel.entity = entity__y;
+				return sel;
+			} else if (field_name == z) {
+				selection_add_index(&sel, 2);
+				sel.entity = entity__z;
+				return sel;
+			}
+		} break;
+
+		case Basic_quaternion256: {
+			// @QuaternionLayout
+			gb_local_persist String w = str_lit("w");
+			gb_local_persist String x = str_lit("x");
+			gb_local_persist String y = str_lit("y");
+			gb_local_persist String z = str_lit("z");
+			gb_local_persist Entity *entity__w = alloc_entity_field(nullptr, make_token_ident(w), t_f64, false, 3);
+			gb_local_persist Entity *entity__x = alloc_entity_field(nullptr, make_token_ident(x), t_f64, false, 0);
+			gb_local_persist Entity *entity__y = alloc_entity_field(nullptr, make_token_ident(y), t_f64, false, 1);
+			gb_local_persist Entity *entity__z = alloc_entity_field(nullptr, make_token_ident(z), t_f64, false, 2);
+			if (field_name == w) {
+				selection_add_index(&sel, 3);
+				sel.entity = entity__w;
+				return sel;
+			} else if (field_name == x) {
+				selection_add_index(&sel, 0);
+				sel.entity = entity__x;
+				return sel;
+			} else if (field_name == y) {
+				selection_add_index(&sel, 1);
+				sel.entity = entity__y;
+				return sel;
+			} else if (field_name == z) {
+				selection_add_index(&sel, 2);
+				sel.entity = entity__z;
+				return sel;
+			}
+		} break;
+
+		case Basic_UntypedQuaternion: {
+			// @QuaternionLayout
+			gb_local_persist String w = str_lit("w");
+			gb_local_persist String x = str_lit("x");
+			gb_local_persist String y = str_lit("y");
+			gb_local_persist String z = str_lit("z");
+			gb_local_persist Entity *entity__w = alloc_entity_field(nullptr, make_token_ident(w), t_untyped_float, false, 3);
+			gb_local_persist Entity *entity__x = alloc_entity_field(nullptr, make_token_ident(x), t_untyped_float, false, 0);
+			gb_local_persist Entity *entity__y = alloc_entity_field(nullptr, make_token_ident(y), t_untyped_float, false, 1);
+			gb_local_persist Entity *entity__z = alloc_entity_field(nullptr, make_token_ident(z), t_untyped_float, false, 2);
+			if (field_name == w) {
+				selection_add_index(&sel, 3);
+				sel.entity = entity__w;
+				return sel;
+			} else if (field_name == x) {
+				selection_add_index(&sel, 0);
+				sel.entity = entity__x;
+				return sel;
+			} else if (field_name == y) {
+				selection_add_index(&sel, 1);
+				sel.entity = entity__y;
+				return sel;
+			} else if (field_name == z) {
+				selection_add_index(&sel, 2);
+				sel.entity = entity__z;
+				return sel;
+			}
+		} break;
+
 		}
 
 		return sel;
@@ -2090,19 +2457,22 @@ Selection lookup_field_with_selection(Type *type_, String field_name, bool is_ty
 		if (type->Array.count <= 4) {
 			// HACK(bill): Memory leak
 			switch (type->Array.count) {
-			#define _ARRAY_FIELD_CASE(_length, _name) \
-			case (_length): \
-				if (field_name == _name) { \
+			#define _ARRAY_FIELD_CASE_IF(_length, _name) \
+				if (field_name == (_name)) { \
 					selection_add_index(&sel, (_length)-1); \
 					sel.entity = alloc_entity_array_elem(nullptr, make_token_ident(str_lit(_name)), type->Array.elem, (_length)-1); \
 					return sel; \
-				} \
+				}
+			#define _ARRAY_FIELD_CASE(_length, _name0, _name1) \
+			case (_length): \
+				_ARRAY_FIELD_CASE_IF(_length, _name0); \
+				_ARRAY_FIELD_CASE_IF(_length, _name1); \
 				/*fallthrough*/
 
-			_ARRAY_FIELD_CASE(4, "w");
-			_ARRAY_FIELD_CASE(3, "z");
-			_ARRAY_FIELD_CASE(2, "y");
-			_ARRAY_FIELD_CASE(1, "x");
+			_ARRAY_FIELD_CASE(4, "w", "a");
+			_ARRAY_FIELD_CASE(3, "z", "b");
+			_ARRAY_FIELD_CASE(2, "y", "g");
+			_ARRAY_FIELD_CASE(1, "x", "r");
 			default: break;
 
 			#undef _ARRAY_FIELD_CASE
@@ -2213,7 +2583,9 @@ i64 type_size_of(Type *t) {
 		return 0;
 	}
 	// NOTE(bill): Always calculate the size when it is a Type_Basic
-	if (t->kind != Type_Basic && t->cached_size >= 0) {
+	if (t->kind == Type_Named && t->cached_size >= 0) {
+
+	} else if (t->kind != Type_Basic && t->cached_size >= 0) {
 		return t->cached_size;
 	}
 	TypePath path = {0};
@@ -2228,7 +2600,9 @@ i64 type_align_of(Type *t) {
 		return 1;
 	}
 	// NOTE(bill): Always calculate the size when it is a Type_Basic
-	if (t->kind != Type_Basic && t->cached_align > 0) {
+	if (t->kind == Type_Named && t->cached_align >= 0) {
+
+	} if (t->kind != Type_Basic && t->cached_align > 0) {
 		return t->cached_align;
 	}
 
@@ -2262,6 +2636,8 @@ i64 type_align_of_internal(Type *t, TypePath *path) {
 
 		case Basic_complex64: case Basic_complex128:
 			return type_size_of_internal(t, path) / 2;
+		case Basic_quaternion128: case Basic_quaternion256:
+			return type_size_of_internal(t, path) / 4;
 		}
 	} break;
 
@@ -2272,6 +2648,17 @@ i64 type_align_of_internal(Type *t, TypePath *path) {
 			return FAILURE_ALIGNMENT;
 		}
 		i64 align = type_align_of_internal(t->Array.elem, path);
+		if (pop) type_path_pop(path);
+		return align;
+	}
+
+	case Type_EnumeratedArray: {
+		Type *elem = t->EnumeratedArray.elem;
+		bool pop = type_path_push(path, elem);
+		if (path->failure) {
+			return FAILURE_ALIGNMENT;
+		}
+		i64 align = type_align_of_internal(t->EnumeratedArray.elem, path);
 		if (pop) type_path_pop(path);
 		return align;
 	}
@@ -2380,12 +2767,24 @@ i64 type_align_of_internal(Type *t, TypePath *path) {
 			return type_align_of(t->BitSet.underlying);
 		}
 		i64 bits = t->BitSet.upper - t->BitSet.lower + 1;
-		if (bits <= 8)  return 1;
-		if (bits <= 16) return 2;
-		if (bits <= 32) return 4;
-		if (bits <= 64) return 8;
+		if (bits <= 8)   return 1;
+		if (bits <= 16)  return 2;
+		if (bits <= 32)  return 4;
+		if (bits <= 64)  return 8;
+		if (bits <= 128) return 16;
 		return 8; // NOTE(bill): Could be an invalid range so limit it for now
+	}
 
+	case Type_SimdVector: {
+		if (t->SimdVector.is_x86_mmx) {
+			return 8;
+		}
+		// align of
+		i64 count = t->SimdVector.count;
+		Type *elem = t->SimdVector.elem;
+		i64 size = count * type_size_of_internal(elem, path);
+		// IMPORTANT TODO(bill): Figure out the alignment of vector types
+		return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_align);
 	}
 	}
 
@@ -2395,7 +2794,7 @@ i64 type_align_of_internal(Type *t, TypePath *path) {
 	return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.word_size);
 }
 
-Array<i64> type_set_offsets_of(Array<Entity *> fields, bool is_packed, bool is_raw_union) {
+Array<i64> type_set_offsets_of(Array<Entity *> const &fields, bool is_packed, bool is_raw_union) {
 	gbAllocator a = heap_allocator();
 	auto offsets = array_make<i64>(a, fields.count);
 	i64 curr_offset = 0;
@@ -2428,15 +2827,16 @@ bool type_set_offsets(Type *t) {
 		if (!t->Struct.are_offsets_set) {
 			t->Struct.are_offsets_being_processed = true;
 			t->Struct.offsets = type_set_offsets_of(t->Struct.fields, t->Struct.is_packed, t->Struct.is_raw_union);
+			GB_ASSERT(t->Struct.offsets.count == t->Struct.fields.count);
 			t->Struct.are_offsets_being_processed = false;
 			t->Struct.are_offsets_set = true;
 			return true;
 		}
 	} else if (is_type_tuple(t)) {
 		if (!t->Tuple.are_offsets_set) {
-			t->Struct.are_offsets_being_processed = true;
-			t->Tuple.offsets = type_set_offsets_of(t->Tuple.variables, false, false);
-			t->Struct.are_offsets_being_processed = false;
+			t->Tuple.are_offsets_being_processed = true;
+			t->Tuple.offsets = type_set_offsets_of(t->Tuple.variables, t->Tuple.is_packed, false);
+			t->Tuple.are_offsets_being_processed = false;
 			t->Tuple.are_offsets_set = true;
 			return true;
 		}
@@ -2501,6 +2901,21 @@ i64 type_size_of_internal(Type *t, TypePath *path) {
 		return alignment*(count-1) + size;
 	} break;
 
+	case Type_EnumeratedArray: {
+		i64 count, align, size, alignment;
+		count = t->EnumeratedArray.count;
+		if (count == 0) {
+			return 0;
+		}
+		align = type_align_of_internal(t->EnumeratedArray.elem, path);
+		if (path->failure) {
+			return FAILURE_SIZE;
+		}
+		size  = type_size_of_internal( t->EnumeratedArray.elem, path);
+		alignment = align_formula(size, align);
+		return alignment*(count-1) + size;
+	} break;
+
 	case Type_Slice: // ptr + len
 		return 2 * build_context.word_size;
 
@@ -2547,14 +2962,23 @@ i64 type_size_of_internal(Type *t, TypePath *path) {
 			}
 		}
 
-		// NOTE(bill): Align to tag
-		i64 tag_size = union_tag_size(t);
-		i64 size = align_formula(max, tag_size);
-		// NOTE(bill): Calculate the padding between the common fields and the tag
-		t->Union.tag_size = tag_size;
-		t->Union.variant_block_size = size - field_size;
+		i64 size = 0;
 
-		return align_formula(size + tag_size, align);
+		if (is_type_union_maybe_pointer(t)) {
+			size = max;
+			t->Union.tag_size = 0;
+			t->Union.variant_block_size = size;
+		} else {
+			// NOTE(bill): Align to tag
+			i64 tag_size = union_tag_size(t);
+			size = align_formula(max, tag_size);
+			// NOTE(bill): Calculate the padding between the common fields and the tag
+			t->Union.tag_size = tag_size;
+			t->Union.variant_block_size = size - field_size;
+
+			size += tag_size;
+		}
+		return align_formula(size, align);
 	} break;
 
 
@@ -2589,7 +3013,14 @@ i64 type_size_of_internal(Type *t, TypePath *path) {
 				type_path_print_illegal_cycle(path, path->path.count-1);
 				return FAILURE_SIZE;
 			}
+			if (t->Struct.are_offsets_set && t->Struct.offsets.count != t->Struct.fields.count) {
+				// TODO(bill, 2019-04-28): Determine exactly why the offsets length is different thatn the field length
+				// Are the the same at some point and then the struct length is increased?
+				// Why is this not handled by the type cycle checker?
+				t->Struct.are_offsets_set = false;
+			}
 			type_set_offsets(t);
+			GB_ASSERT_MSG(t->Struct.offsets.count == t->Struct.fields.count, "%s", type_to_string(t));
 			size = t->Struct.offsets[cast(isize)count-1] + type_size_of_internal(t->Struct.fields[cast(isize)count-1]->type, path);
 			return align_formula(size, align);
 		}
@@ -2612,11 +3043,21 @@ i64 type_size_of_internal(Type *t, TypePath *path) {
 			return type_size_of(t->BitSet.underlying);
 		}
 		i64 bits = t->BitSet.upper - t->BitSet.lower + 1;
-		if (bits <= 8)  return 1;
-		if (bits <= 16) return 2;
-		if (bits <= 32) return 4;
-		if (bits <= 64) return 8;
+		if (bits <= 8)   return 1;
+		if (bits <= 16)  return 2;
+		if (bits <= 32)  return 4;
+		if (bits <= 64)  return 8;
+		if (bits <= 128) return 16;
 		return 8; // NOTE(bill): Could be an invalid range so limit it for now
+	}
+
+	case Type_SimdVector: {
+		if (t->SimdVector.is_x86_mmx) {
+			return 8;
+		}
+		i64 count = t->SimdVector.count;
+		Type *elem = t->SimdVector.elem;
+		return count * type_size_of_internal(elem, path);
 	}
 	}
 
@@ -2731,7 +3172,13 @@ gbString write_type_to_string(gbString str, Type *type) {
 
 	case Type_Generic:
 		if (type->Generic.name.len == 0) {
-			str = gb_string_appendc(str, "type");
+			if (type->Generic.entity != nullptr) {
+				String name = type->Generic.entity->token.string;
+				str = gb_string_append_rune(str, '$');
+				str = gb_string_append_length(str, name.text, name.len);
+			} else {
+				str = gb_string_appendc(str, "type");
+			}
 		} else {
 			String name = type->Generic.name;
 			str = gb_string_append_rune(str, '$');
@@ -2751,6 +3198,13 @@ gbString write_type_to_string(gbString str, Type *type) {
 	case Type_Opaque:
 		str = gb_string_appendc(str, "opaque ");
 		str = write_type_to_string(str, type->Opaque.elem);
+		break;
+
+	case Type_EnumeratedArray:
+		str = gb_string_append_rune(str, '[');
+		str = write_type_to_string(str, type->EnumeratedArray.index);
+		str = gb_string_append_rune(str, ']');
+		str = write_type_to_string(str, type->EnumeratedArray.elem);
 		break;
 
 	case Type_Array:
@@ -2798,7 +3252,18 @@ gbString write_type_to_string(gbString str, Type *type) {
 		break;
 
 	case Type_Struct: {
-			str = gb_string_appendc(str, "struct");
+		if (type->Struct.soa_kind != StructSoa_None) {
+			switch (type->Struct.soa_kind) {
+			case StructSoa_Fixed:   str = gb_string_append_fmt(str, "#soa[%d]", cast(int)type->Struct.soa_count); break;
+			case StructSoa_Slice:   str = gb_string_appendc(str,    "#soa[]");                                    break;
+			case StructSoa_Dynamic: str = gb_string_appendc(str,    "#soa[dynamic]");                             break;
+			default: GB_PANIC("Unknown StructSoaKind"); break;
+			}
+			str = write_type_to_string(str, type->Struct.soa_elem);
+			break;
+		}
+
+		str = gb_string_appendc(str, "struct");
 		if (type->Struct.is_packed)    str = gb_string_appendc(str, " #packed");
 		if (type->Struct.is_raw_union) str = gb_string_appendc(str, " #raw_union");
 		str = gb_string_appendc(str, " {");
@@ -2836,35 +3301,54 @@ gbString write_type_to_string(gbString str, Type *type) {
 			isize comma_index = 0;
 			for_array(i, type->Tuple.variables) {
 				Entity *var = type->Tuple.variables[i];
-				if (var != nullptr) {
-					if (var->kind == Entity_Constant) {
-						// Ignore
-						continue;
-					}
-
-					if (comma_index++ > 0) {
-						str = gb_string_appendc(str, ", ");
-					}
-
-					if (var->kind == Entity_Variable) {
-						if (var->flags&EntityFlag_CVarArg) {
-							str = gb_string_appendc(str, "#c_vararg ");
-						}
-						if (var->flags&EntityFlag_Ellipsis) {
-							Type *slice = base_type(var->type);
-							str = gb_string_appendc(str, "..");
-							GB_ASSERT(var->type->kind == Type_Slice);
-							str = write_type_to_string(str, slice->Slice.elem);
-						} else {
-							str = write_type_to_string(str, var->type);
-						}
+				if (var == nullptr) {
+					continue;
+				}
+				String name = var->token.string;
+				if (var->kind == Entity_Constant) {
+					str = gb_string_appendc(str, "$");
+					str = gb_string_append_length(str, name.text, name.len);
+					if (!is_type_untyped(var->type)) {
+						str = gb_string_appendc(str, ": ");
+						str = write_type_to_string(str, var->type);
+						str = gb_string_appendc(str, " = ");
+						str = write_exact_value_to_string(str, var->Constant.value);
 					} else {
-						GB_ASSERT(var->kind == Entity_TypeName);
-						if (var->type->kind == Type_Generic) {
-							str = gb_string_appendc(str, "type/");
+						str = gb_string_appendc(str, "=");
+						str = write_exact_value_to_string(str, var->Constant.value);
+					}
+					continue;
+				}
+
+				if (comma_index++ > 0) {
+					str = gb_string_appendc(str, ", ");
+				}
+
+				if (var->kind == Entity_Variable) {
+					if (var->flags&EntityFlag_CVarArg) {
+						str = gb_string_appendc(str, "#c_vararg ");
+					}
+					if (var->flags&EntityFlag_Ellipsis) {
+						Type *slice = base_type(var->type);
+						str = gb_string_appendc(str, "..");
+						GB_ASSERT(var->type->kind == Type_Slice);
+						str = write_type_to_string(str, slice->Slice.elem);
+					} else {
+						str = write_type_to_string(str, var->type);
+					}
+				} else {
+					GB_ASSERT(var->kind == Entity_TypeName);
+					if (var->type->kind == Type_Generic) {
+						str = gb_string_appendc(str, "typeid/");
+						str = write_type_to_string(str, var->type);
+					} else {
+						if (var->kind == Entity_TypeName) {
+							str = gb_string_appendc(str, "$");
+							str = gb_string_append_length(str, name.text, name.len);
+							str = gb_string_appendc(str, "=");
 							str = write_type_to_string(str, var->type);
 						} else {
-							str = gb_string_appendc(str, "type");
+							str = gb_string_appendc(str, "typeid");
 						}
 					}
 				}
@@ -2889,6 +3373,9 @@ gbString write_type_to_string(gbString str, Type *type) {
 			break;
 		case ProcCC_FastCall:
 			str = gb_string_appendc(str, " \"fastcall\" ");
+			break;
+		case ProcCC_None:
+			str = gb_string_appendc(str, " \"none\" ");
 			break;
 		// case ProcCC_VectorCall:
 		// 	str = gb_string_appendc(str, " \"vectorcall\" ");
@@ -2919,7 +3406,6 @@ gbString write_type_to_string(gbString str, Type *type) {
 			Entity *f = type->BitField.fields[i];
 			GB_ASSERT(f->kind == Entity_Variable);
 			GB_ASSERT(f->type != nullptr && f->type->kind == Type_BitFieldValue);
-			str = gb_string_append_rune(str, '{');
 			if (i > 0) {
 				str = gb_string_appendc(str, ", ");
 			}
@@ -2942,6 +3428,15 @@ gbString write_type_to_string(gbString str, Type *type) {
 			str = write_type_to_string(str, type->BitSet.underlying);
 		}
 		str = gb_string_appendc(str, "]");
+		break;
+
+	case Type_SimdVector:
+		if (type->SimdVector.is_x86_mmx) {
+			return gb_string_appendc(str, "intrinsics.x86_mmx");
+		} else {
+			str = gb_string_append_fmt(str, "#simd[%d]", cast(int)type->SimdVector.count);
+			str = write_type_to_string(str, type->SimdVector.elem);
+		}
 		break;
 	}
 

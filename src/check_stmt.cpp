@@ -132,6 +132,10 @@ bool check_is_terminating(Ast *node) {
 		}
 	case_end;
 
+	case_ast_node(rs, InlineRangeStmt, node);
+		return false;
+	case_end;
+
 	case_ast_node(rs, RangeStmt, node);
 		return false;
 	case_end;
@@ -171,6 +175,9 @@ bool check_is_terminating(Ast *node) {
 
 	return false;
 }
+
+
+
 
 Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, Operand *rhs) {
 	if (rhs->mode == Addressing_Invalid) {
@@ -249,39 +256,19 @@ Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, Operand *rhs)
 	case Addressing_Invalid:
 		return nullptr;
 
-	case Addressing_Variable: {
+	case Addressing_Variable:
 		if (is_type_bit_field_value(lhs->type)) {
-			Type *lt = base_type(lhs->type);
-			i64 lhs_bits = lt->BitFieldValue.bits;
-			if (rhs->mode == Addressing_Constant) {
-				ExactValue v = exact_value_to_integer(rhs->value);
-				if (v.kind == ExactValue_Integer) {
-					BigInt i = v.value_integer;
-					if (!i.neg) {
-						u64 imax_ = ~cast(u64)0ull;
-						if (lhs_bits < 64) {
-							imax_ = (1ull << cast(u64)lhs_bits) - 1ull;
-						}
-
-						BigInt imax = big_int_make_u64(imax_);
-						if (big_int_cmp(&i, &imax) > 0) {
-							return rhs->type;
-						}
-					}
-				}
-			} else if (is_type_integer(rhs->type)) {
-				// TODO(bill): Any other checks?
-				return rhs->type;
+			Type *res = check_assignment_bit_field(ctx, rhs, lhs->type);
+			if (res == nullptr) {
+				gbString lhs_expr = expr_to_string(lhs->expr);
+				gbString rhs_expr = expr_to_string(rhs->expr);
+				error(rhs->expr, "Cannot assign '%s' to bit field '%s'", rhs_expr, lhs_expr);
+				gb_string_free(rhs_expr);
+				gb_string_free(lhs_expr);
 			}
-			gbString lhs_expr = expr_to_string(lhs->expr);
-			gbString rhs_expr = expr_to_string(rhs->expr);
-			error(rhs->expr, "Cannot assign '%s' to bit field '%s'", rhs_expr, lhs_expr);
-			gb_string_free(rhs_expr);
-			gb_string_free(lhs_expr);
-			return nullptr;
+			return res;
 		}
 		break;
-	}
 
 	case Addressing_MapIndex: {
 		Ast *ln = unparen_expr(lhs->expr);
@@ -306,6 +293,9 @@ Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, Operand *rhs)
 		break;
 	}
 
+	case Addressing_SoaVariable:
+		break;
+
 	default: {
 		if (lhs->expr->kind == Ast_SelectorExpr) {
 			// NOTE(bill): Extra error checks
@@ -320,9 +310,11 @@ Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, Operand *rhs)
 			}
 		}
 
+		Entity *e = entity_of_ident(lhs->expr);
+
 		gbString str = expr_to_string(lhs->expr);
-		if (lhs->mode == Addressing_Immutable) {
-			error(lhs->expr, "Cannot assign to an immutable: '%s'", str);
+		if (e != nullptr && e->flags & EntityFlag_Param) {
+			error(lhs->expr, "Cannot assign to '%s' which is a procedure parameter", str);
 		} else {
 			error(lhs->expr, "Cannot assign to '%s'", str);
 		}
@@ -343,27 +335,26 @@ Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, Operand *rhs)
 
 void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags);
 void check_stmt(CheckerContext *ctx, Ast *node, u32 flags) {
-	u32 prev_stmt_state_flags = ctx->stmt_state_flags;
+	u32 prev_state_flags = ctx->state_flags;
 
-	if (node->stmt_state_flags != 0) {
-		u32 in = node->stmt_state_flags;
-		u32 out = ctx->stmt_state_flags;
+	if (node->state_flags != 0) {
+		u32 in = node->state_flags;
+		u32 out = ctx->state_flags;
 
-		if (in & StmtStateFlag_no_bounds_check) {
-			out |= StmtStateFlag_no_bounds_check;
-			out &= ~StmtStateFlag_bounds_check;
-		} else {
-		// if (in & StmtStateFlag_bounds_check) {
-			out |= StmtStateFlag_bounds_check;
-			out &= ~StmtStateFlag_no_bounds_check;
+		if (in & StateFlag_no_bounds_check) {
+			out |= StateFlag_no_bounds_check;
+			out &= ~StateFlag_bounds_check;
+		} else if (in & StateFlag_bounds_check) {
+			out |= StateFlag_bounds_check;
+			out &= ~StateFlag_no_bounds_check;
 		}
 
-		ctx->stmt_state_flags = out;
+		ctx->state_flags = out;
 	}
 
 	check_stmt_internal(ctx, node, flags);
 
-	ctx->stmt_state_flags = prev_stmt_state_flags;
+	ctx->state_flags = prev_state_flags;
 }
 
 
@@ -474,10 +465,11 @@ bool check_using_stmt_entity(CheckerContext *ctx, AstUsingStmt *us, Ast *expr, b
 	case Entity_ImportName: {
 		Scope *scope = e->ImportName.scope;
 		for_array(i, scope->elements.entries) {
+			String name = scope->elements.entries[i].key.string;
 			Entity *decl = scope->elements.entries[i].value;
 			if (!is_entity_exported(decl)) continue;
 
-			Entity *found = scope_insert(ctx->scope, decl);
+			Entity *found = scope_insert_with_name(ctx->scope, name, decl);
 			if (found != nullptr) {
 				gbString expr_str = expr_to_string(expr);
 				error(us->token,
@@ -504,8 +496,7 @@ bool check_using_stmt_entity(CheckerContext *ctx, AstUsingStmt *us, Ast *expr, b
 			for_array(i, found->elements.entries) {
 				Entity *f = found->elements.entries[i].value;
 				if (f->kind == Entity_Variable) {
-					Entity *uvar = alloc_entity_using_variable(e, f->token, f->type);
-					uvar->using_expr = expr;
+					Entity *uvar = alloc_entity_using_variable(e, f->token, f->type, expr);
 					Entity *prev = scope_insert(ctx->scope, uvar);
 					if (prev != nullptr) {
 						gbString expr_str = expr_to_string(expr);
@@ -558,6 +549,7 @@ struct TypeAndToken {
 	Token token;
 };
 
+
 void add_constant_switch_case(CheckerContext *ctx, Map<TypeAndToken> *seen, Operand operand, bool use_expr = true) {
 	if (operand.mode != Addressing_Constant) {
 		return;
@@ -575,28 +567,190 @@ void add_constant_switch_case(CheckerContext *ctx, Map<TypeAndToken> *seen, Oper
 		multi_map_get_all(seen, key, taps);
 		for (isize i = 0; i < count; i++) {
 			TypeAndToken tap = taps[i];
-			if (are_types_identical(operand.type, tap.type)) {
-				TokenPos pos = tap.token.pos;
-				if (use_expr) {
-					gbString expr_str = expr_to_string(operand.expr);
-					error(operand.expr,
-					      "Duplicate case '%s'\n"
-					      "\tprevious case at %.*s(%td:%td)",
-					      expr_str,
-					      LIT(pos.file), pos.line, pos.column);
-					gb_string_free(expr_str);
-				} else {
-					error(operand.expr,
-					      "Duplicate case found with previous case at %.*s(%td:%td)",
-					      LIT(pos.file), pos.line, pos.column);
-				}
-				return;
+			if (!are_types_identical(operand.type, tap.type)) {
+				continue;
 			}
+
+			TokenPos pos = tap.token.pos;
+			if (use_expr) {
+				gbString expr_str = expr_to_string(operand.expr);
+				error(operand.expr,
+				      "Duplicate case '%s'\n"
+				      "\tprevious case at %.*s(%td:%td)",
+				      expr_str,
+				      LIT(pos.file), pos.line, pos.column);
+				gb_string_free(expr_str);
+			} else {
+				error(operand.expr,
+				      "Duplicate case found with previous case at %.*s(%td:%td)",
+				      LIT(pos.file), pos.line, pos.column);
+			}
+			return;
 		}
 	}
 
 	TypeAndToken tap = {operand.type, ast_token(operand.expr)};
 	multi_map_insert(seen, key, tap);
+}
+
+void check_inline_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
+	ast_node(irs, InlineRangeStmt, node);
+	check_open_scope(ctx, node);
+
+	Type *val0 = nullptr;
+	Type *val1 = nullptr;
+	Entity *entities[2] = {};
+	isize entity_count = 0;
+
+	Ast *expr = unparen_expr(irs->expr);
+
+	ExactValue inline_for_depth = exact_value_i64(0);
+
+	if (is_ast_range(expr)) {
+		ast_node(ie, BinaryExpr, expr);
+		Operand x = {};
+		Operand y = {};
+
+		bool ok = check_range(ctx, expr, &x, &y, &inline_for_depth);
+		if (!ok) {
+			goto skip_expr;
+		}
+
+		val0 = x.type;
+		val1 = t_int;
+	} else {
+		Operand operand = {Addressing_Invalid};
+		check_expr_or_type(ctx, &operand, irs->expr);
+
+		if (operand.mode == Addressing_Type) {
+			if (!is_type_enum(operand.type)) {
+				gbString t = type_to_string(operand.type);
+				error(operand.expr, "Cannot iterate over the type '%s'", t);
+				gb_string_free(t);
+				goto skip_expr;
+			} else {
+				val0 = operand.type;
+				val1 = t_int;
+				add_type_info_type(ctx, operand.type);
+
+				Type *bt = base_type(operand.type);
+				inline_for_depth = exact_value_i64(bt->Enum.fields.count);
+				goto skip_expr;
+			}
+		} else if (operand.mode != Addressing_Invalid) {
+			Type *t = base_type(operand.type);
+			switch (t->kind) {
+			case Type_Basic:
+				if (is_type_string(t) && t->Basic.kind != Basic_cstring) {
+					val0 = t_rune;
+					val1 = t_int;
+					inline_for_depth = exact_value_i64(operand.value.value_string.len);
+				}
+				break;
+			case Type_Array:
+				val0 = t->Array.elem;
+				val1 = t_int;
+				inline_for_depth = exact_value_i64(t->Array.count);
+				break;
+			case Type_EnumeratedArray:
+				val0 = t->EnumeratedArray.elem;
+				val1 = t->EnumeratedArray.index;
+				inline_for_depth = exact_value_i64(t->EnumeratedArray.count);
+				break;
+			}
+		}
+
+		if (val0 == nullptr) {
+			gbString s = expr_to_string(operand.expr);
+			gbString t = type_to_string(operand.type);
+			error(operand.expr, "Cannot iterate over '%s' of type '%s' in an 'inline for' statement", s, t);
+			gb_string_free(t);
+			gb_string_free(s);
+		} else if (operand.mode != Addressing_Constant) {
+			error(operand.expr, "An 'inline for' expression must be known at compile time");
+		}
+	}
+
+	skip_expr:; // NOTE(zhiayang): again, declaring a variable immediately after a label... weird.
+
+	Ast * lhs[2] = {irs->val0, irs->val1};
+	Type *rhs[2] = {val0, val1};
+
+	for (isize i = 0; i < 2; i++) {
+		if (lhs[i] == nullptr) {
+			continue;
+		}
+		Ast * name = lhs[i];
+		Type *type = rhs[i];
+
+		Entity *entity = nullptr;
+		if (name->kind == Ast_Ident) {
+			Token token = name->Ident.token;
+			String str = token.string;
+			Entity *found = nullptr;
+
+			if (!is_blank_ident(str)) {
+				found = scope_lookup_current(ctx->scope, str);
+			}
+			if (found == nullptr) {
+				entity = alloc_entity_variable(ctx->scope, token, type, EntityState_Resolved);
+				entity->flags |= EntityFlag_Value;
+				add_entity_definition(&ctx->checker->info, name, entity);
+			} else {
+				TokenPos pos = found->token.pos;
+				error(token,
+				      "Redeclaration of '%.*s' in this scope\n"
+				      "\tat %.*s(%td:%td)",
+				      LIT(str), LIT(pos.file), pos.line, pos.column);
+				entity = found;
+			}
+		} else {
+			error(name, "A variable declaration must be an identifier");
+		}
+
+		if (entity == nullptr) {
+			entity = alloc_entity_dummy_variable(builtin_pkg->scope, ast_token(name));
+		}
+
+		entities[entity_count++] = entity;
+
+		if (type == nullptr) {
+			entity->type = t_invalid;
+			entity->flags |= EntityFlag_Used;
+		}
+	}
+
+	for (isize i = 0; i < entity_count; i++) {
+		add_entity(ctx->checker, ctx->scope, entities[i]->identifier, entities[i]);
+	}
+
+
+	// NOTE(bill): Minimize the amount of nesting of an 'inline for'
+	i64 prev_inline_for_depth = ctx->inline_for_depth;
+	defer (ctx->inline_for_depth = prev_inline_for_depth);
+	{
+		i64 v = exact_value_to_i64(inline_for_depth);
+		if (v <= 0) {
+			// Do nothing
+		} else {
+			ctx->inline_for_depth = gb_max(ctx->inline_for_depth, 1) * v;
+		}
+
+		if (ctx->inline_for_depth >= MAX_INLINE_FOR_DEPTH && prev_inline_for_depth < MAX_INLINE_FOR_DEPTH) {
+			if (prev_inline_for_depth > 0) {
+				error(node, "Nested 'inline for' loop cannot be inlined as it exceeds the maximum inline for depth (%lld levels >= %lld maximum levels)", v, MAX_INLINE_FOR_DEPTH);
+			} else {
+				error(node, "'inline for' loop cannot be inlined as it exceeds the maximum inline for depth (%lld levels >= %lld maximum levels)", v, MAX_INLINE_FOR_DEPTH);
+			}
+			error_line("\tUse a normal 'for' loop instead by removing the 'inline' prefix\n");
+			ctx->inline_for_depth = MAX_INLINE_FOR_DEPTH;
+		}
+	}
+
+	check_stmt(ctx, irs->body, mod_flags);
+
+
+	check_close_scope(ctx);
 }
 
 void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
@@ -658,12 +812,11 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		}
 	}
 
-	bool complete = ss->complete;
+	bool is_partial = ss->partial;
 
-	if (complete) {
+	if (is_partial) {
 		if (!is_type_enum(x.type)) {
-			error(x.expr, "#complete switch statement can be only used with an enum type");
-			complete = false;
+			error(x.expr, "#partial switch statement can be only used with an enum type");
 		}
 	}
 
@@ -683,17 +836,17 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 			Ast *expr = unparen_expr(cc->list[j]);
 
 			if (is_ast_range(expr)) {
-				ast_node(ie, BinaryExpr, expr);
+				ast_node(be, BinaryExpr, expr);
 				Operand lhs = {};
 				Operand rhs = {};
-				check_expr(ctx, &lhs, ie->left);
+				check_expr_with_type_hint(ctx, &lhs, be->left, x.type);
 				if (x.mode == Addressing_Invalid) {
 					continue;
 				}
 				if (lhs.mode == Addressing_Invalid) {
 					continue;
 				}
-				check_expr(ctx, &rhs, ie->right);
+				check_expr_with_type_hint(ctx, &rhs, be->right, x.type);
 				if (rhs.mode == Addressing_Invalid) {
 					continue;
 				}
@@ -705,6 +858,13 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 					continue;
 				}
 
+				TokenKind upper_op = Token_Invalid;
+				switch (be->op.kind) {
+				case Token_Ellipsis:  upper_op = Token_GtEq; break;
+				case Token_RangeHalf: upper_op = Token_Gt;   break;
+				default: GB_PANIC("Invalid range operator"); break;
+				}
+
 
 				Operand a = lhs;
 				Operand b = rhs;
@@ -713,7 +873,7 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 					continue;
 				}
 
-				check_comparison(ctx, &b, &x, Token_GtEq);
+				check_comparison(ctx, &b, &x, upper_op);
 				if (b.mode == Addressing_Invalid) {
 					continue;
 				}
@@ -721,18 +881,24 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 				Operand a1 = lhs;
 				Operand b1 = rhs;
 				check_comparison(ctx, &a1, &b1, Token_LtEq);
-				if (complete) {
-					error(lhs.expr, "#complete switch statement does not allow ranges");
-				}
 
 				add_constant_switch_case(ctx, &seen, lhs);
-				add_constant_switch_case(ctx, &seen, rhs);
+				if (upper_op == Token_GtEq) {
+					add_constant_switch_case(ctx, &seen, rhs);
+				}
+
+				if (is_type_string(x.type)) {
+					// NOTE(bill): Force dependency for strings here
+					add_package_dependency(ctx, "runtime", "string_le");
+					add_package_dependency(ctx, "runtime", "string_lt");
+				}
+
 			} else {
 				Operand y = {};
 				if (is_type_typeid(x.type)) {
 					check_expr_or_type(ctx, &y, expr, x.type);
 				} else {
-					check_expr(ctx, &y, expr);
+					check_expr_with_type_hint(ctx, &y, expr, x.type);
 				}
 
 				if (x.mode == Addressing_Invalid ||
@@ -761,9 +927,6 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 						continue;
 					}
 					if (y.mode != Addressing_Constant) {
-						if (complete) {
-							error(y.expr, "#complete switch statement only allows constant case clauses");
-						}
 						continue;
 					}
 
@@ -777,7 +940,7 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		check_close_scope(ctx);
 	}
 
-	if (complete) {
+	if (!is_partial && is_type_enum(x.type)) {
 		Type *et = base_type(x.type);
 		GB_ASSERT(is_type_enum(et));
 		auto fields = et->Enum.fields;
@@ -799,19 +962,21 @@ void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		}
 
 		if (unhandled.count > 0) {
+			begin_error_block();
+			defer (begin_error_block());
+
 			if (unhandled.count == 1) {
-				error_no_newline(node, "Unhandled switch case: ");
+				error_no_newline(node, "Unhandled switch case: %.*s", LIT(unhandled[0]->token.string));
 			} else {
 				error_no_newline(node, "Unhandled switch cases: ");
-			}
-			for_array(i, unhandled) {
-				Entity *f = unhandled[i];
-				if (i > 0)  {
-					gb_printf_err(", ");
+				for_array(i, unhandled) {
+					Entity *f = unhandled[i];
+					error_line("\t%.*s\n", LIT(f->token.string));
 				}
-				gb_printf_err("%.*s", LIT(f->token.string));
 			}
-			gb_printf_err("\n");
+			error_line("\n");
+
+			error_line("\tSuggestion: Was '#partial switch' wanted? This replaces the previous '#complete switch'.\n");
 		}
 	}
 }
@@ -874,11 +1039,10 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		return;
 	}
 
-	bool complete = ss->complete;
-	if (complete) {
+	bool is_partial = ss->partial;
+	if (is_partial) {
 		if (switch_kind != TypeSwitch_Union) {
-			error(node, "#complete switch statement may only be used with a union");
-			complete = false;
+			error(node, "#partial switch statement may only be used with a union");
 		}
 	}
 
@@ -964,7 +1128,7 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 					GB_PANIC("Unknown type to type switch statement");
 				}
 
-				if (ptr_set_exists(&seen, y.type)) {
+				if (type_ptr_set_exists(&seen, y.type)) {
 					TokenPos pos = cc->token.pos;
 					gbString expr_str = expr_to_string(y.expr);
 					error(y.expr,
@@ -980,7 +1144,6 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		}
 
 		if (is_ptr &&
-		    !is_type_any(type_deref(x.type)) &&
 		    cc->list.count == 1 &&
 		    case_type != nullptr) {
 			case_type = alloc_type_pointer(case_type);
@@ -996,7 +1159,7 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 
 		check_open_scope(ctx, stmt);
 		{
-			Entity *tag_var = alloc_entity_variable(ctx->scope, lhs->Ident.token, case_type, false, EntityState_Resolved);
+			Entity *tag_var = alloc_entity_variable(ctx->scope, lhs->Ident.token, case_type, EntityState_Resolved);
 			tag_var->flags |= EntityFlag_Used;
 			tag_var->flags |= EntityFlag_Value;
 			add_entity(ctx->checker, ctx->scope, lhs, tag_var);
@@ -1007,7 +1170,7 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		check_close_scope(ctx);
 	}
 
-	if (complete) {
+	if (!is_partial && is_type_union(type_deref(x.type))) {
 		Type *ut = base_type(type_deref(x.type));
 		GB_ASSERT(is_type_union(ut));
 		auto variants = ut->Union.variants;
@@ -1017,27 +1180,27 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 
 		for_array(i, variants) {
 			Type *t = variants[i];
-			if (!ptr_set_exists(&seen, t)) {
+			if (!type_ptr_set_exists(&seen, t)) {
 				array_add(&unhandled, t);
 			}
 		}
 
 		if (unhandled.count > 0) {
 			if (unhandled.count == 1) {
-				error_no_newline(node, "Unhandled switch case: ");
-			} else {
-				error_no_newline(node, "Unhandled switch cases: ");
-			}
-			for_array(i, unhandled) {
-				Type *t = unhandled[i];
-				if (i > 0)  {
-					gb_printf_err(", ");
-				}
-				gbString s = type_to_string(t);
-				gb_printf_err("%s", s);
+				gbString s = type_to_string(unhandled[0]);
+				error_no_newline(node, "Unhandled switch case: %s", s);
 				gb_string_free(s);
+			} else {
+				error_no_newline(node, "Unhandled switch cases:\n");
+				for_array(i, unhandled) {
+					Type *t = unhandled[i];
+					gbString s = type_to_string(t);
+					error_line("\t%s\n", s);
+					gb_string_free(s);
+				}
 			}
-			gb_printf_err("\n");
+			error_line("\n");
+			error_line("\tSuggestion: Was '#partial switch' wanted? This replaces the previous '#complete switch'.\n");
 		}
 	}
 }
@@ -1126,7 +1289,8 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 			isize rhs_count = rhs_operands.count;
 			for_array(i, rhs_operands) {
 				if (rhs_operands[i].mode == Addressing_Invalid) {
-					rhs_count--;
+					// TODO(bill): Should I ignore invalid parameters?
+					// rhs_count--;
 				}
 			}
 
@@ -1162,7 +1326,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 			be->right = as->rhs[0];
 
 			check_expr(ctx, &lhs, as->lhs[0]);
-			check_binary_expr(ctx, &rhs, &binary_expr, true);
+			check_binary_expr(ctx, &rhs, &binary_expr, nullptr, true);
 			if (rhs.mode == Addressing_Invalid) {
 				return;
 			}
@@ -1247,7 +1411,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 		auto operands = array_make<Operand>(heap_allocator(), 0, 2*rs->results.count);
 		defer (array_free(&operands));
 
-		check_unpack_arguments(ctx, result_entities, result_count, &operands, rs->results, true);
+		check_unpack_arguments(ctx, result_entities, result_count, &operands, rs->results, true, false);
 
 		if (result_count == 0 && rs->results.count > 0) {
 			error(rs->results[0], "No return values expected");
@@ -1283,8 +1447,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 		if (fs->post != nullptr) {
 			check_stmt(ctx, fs->post, 0);
 
-			if (fs->post->kind != Ast_AssignStmt &&
-			    fs->post->kind != Ast_IncDecStmt) {
+			if (fs->post->kind != Ast_AssignStmt) {
 				error(fs->post, "'for' statement post statement must be a simple statement");
 			}
 		}
@@ -1292,6 +1455,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 
 		check_close_scope(ctx);
 	case_end;
+
 
 	case_ast_node(rs, RangeStmt, node);
 		u32 new_flags = mod_flags | Stmt_BreakAllowed | Stmt_ContinueAllowed;
@@ -1310,103 +1474,31 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 
 		if (is_ast_range(expr)) {
 			ast_node(ie, BinaryExpr, expr);
-			Operand x = {Addressing_Invalid};
-			Operand y = {Addressing_Invalid};
+			Operand x = {};
+			Operand y = {};
 
-			check_expr(ctx, &x, ie->left);
-			if (x.mode == Addressing_Invalid) {
-				goto skip_expr;
+			bool ok = check_range(ctx, expr, &x, &y, nullptr);
+			if (!ok) {
+				goto skip_expr_range_stmt;
 			}
-			check_expr(ctx, &y, ie->right);
-			if (y.mode == Addressing_Invalid) {
-				goto skip_expr;
-			}
-
-			convert_to_typed(ctx, &x, y.type);
-			if (x.mode == Addressing_Invalid) {
-				goto skip_expr;
-			}
-			convert_to_typed(ctx, &y, x.type);
-			if (y.mode == Addressing_Invalid) {
-				goto skip_expr;
-			}
-
-			convert_to_typed(ctx, &x, default_type(y.type));
-			if (x.mode == Addressing_Invalid) {
-				goto skip_expr;
-			}
-			convert_to_typed(ctx, &y, default_type(x.type));
-			if (y.mode == Addressing_Invalid) {
-				goto skip_expr;
-			}
-
-			if (!are_types_identical(x.type, y.type)) {
-				if (x.type != t_invalid &&
-				    y.type != t_invalid) {
-					gbString xt = type_to_string(x.type);
-					gbString yt = type_to_string(y.type);
-					gbString expr_str = expr_to_string(x.expr);
-					error(ie->op, "Mismatched types in interval expression '%s' : '%s' vs '%s'", expr_str, xt, yt);
-					gb_string_free(expr_str);
-					gb_string_free(yt);
-					gb_string_free(xt);
-				}
-				goto skip_expr;
-			}
-
-			Type *type = x.type;
-			if (!is_type_integer(type) && !is_type_float(type) && !is_type_pointer(type) && !is_type_enum(type)) {
-				error(ie->op, "Only numerical and pointer types are allowed within interval expressions");
-				goto skip_expr;
-			}
-
-			if (x.mode == Addressing_Constant &&
-			    y.mode == Addressing_Constant) {
-				ExactValue a = x.value;
-				ExactValue b = y.value;
-
-				GB_ASSERT(are_types_identical(x.type, y.type));
-
-				TokenKind op = Token_Lt;
-				switch (ie->op.kind) {
-				case Token_Ellipsis: op = Token_LtEq; break;
-				default: error(ie->op, "Invalid range operator"); break;
-				}
-				bool ok = compare_exact_values(op, a, b);
-				if (!ok) {
-					// TODO(bill): Better error message
-					error(ie->op, "Invalid interval range");
-					goto skip_expr;
-				}
-			}
-
-			if (x.mode != Addressing_Constant) {
-				x.value = empty_exact_value;
-			}
-			if (y.mode != Addressing_Constant) {
-				y.value = empty_exact_value;
-			}
-
-
-			add_type_and_value(&ctx->checker->info, ie->left,  x.mode, x.type, x.value);
-			add_type_and_value(&ctx->checker->info, ie->right, y.mode, y.type, y.value);
-			val0 = type;
+			val0 = x.type;
 			val1 = t_int;
 		} else {
 			Operand operand = {Addressing_Invalid};
-			check_expr_or_type(ctx, &operand, rs->expr);
+			check_expr_base(ctx, &operand, expr, nullptr);
+			error_operand_no_value(&operand);
 
 			if (operand.mode == Addressing_Type) {
 				if (!is_type_enum(operand.type)) {
 					gbString t = type_to_string(operand.type);
 					error(operand.expr, "Cannot iterate over the type '%s'", t);
 					gb_string_free(t);
-					goto skip_expr;
+					goto skip_expr_range_stmt;
 				} else {
 					val0 = operand.type;
 					val1 = t_int;
 					add_type_info_type(ctx, operand.type);
-					goto skip_expr;
+					goto skip_expr_range_stmt;
 				}
 			} else if (operand.mode != Addressing_Invalid) {
 				bool is_ptr = is_type_pointer(operand.type);
@@ -1419,6 +1511,12 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 						add_package_dependency(ctx, "runtime", "string_decode_rune");
 					}
 					break;
+
+				case Type_EnumeratedArray:
+					val0 = t->EnumeratedArray.elem;
+					val1 = t->EnumeratedArray.index;
+					break;
+
 				case Type_Array:
 					val0 = t->Array.elem;
 					val1 = t_int;
@@ -1439,6 +1537,45 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					val0 = t->Map.key;
 					val1 = t->Map.value;
 					break;
+
+				case Type_Tuple:
+					if (false) {
+						check_not_tuple(ctx, &operand);
+					} else {
+						isize count = t->Tuple.variables.count;
+						if (count < 1 || count > 3) {
+							check_not_tuple(ctx, &operand);
+							error_line("\tMultiple return valued parameters in a range statement are limited to a maximum of 2 usable values with a trailing boolean for the conditional\n");
+							break;
+						}
+						Type *cond_type = t->Tuple.variables[count-1]->type;
+						if (!is_type_boolean(cond_type)) {
+							gbString s = type_to_string(cond_type);
+							error(operand.expr, "The final type of %td-valued tuple must be a boolean, got %s", count, s);
+							gb_string_free(s);
+							break;
+						}
+
+						if (count > 1) val0 = t->Tuple.variables[0]->type;
+						if (count > 2) val1 = t->Tuple.variables[1]->type;
+
+						if (rs->val1 != nullptr && count < 3) {
+							gbString s = type_to_string(t);
+							error(operand.expr, "Expected a 3-value tuple on the rhs, got (%s)", s);
+							gb_string_free(s);
+							break;
+						}
+
+						if (rs->val0 != nullptr && count < 2) {
+							gbString s = type_to_string(t);
+							error(operand.expr, "Expected at least a 2-values tuple on the rhs, got (%s)", s);
+							gb_string_free(s);
+							break;
+						}
+
+					}
+					break;
+
 				}
 			}
 
@@ -1451,7 +1588,8 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 			}
 		}
 
-	skip_expr:; // NOTE(zhiayang): again, declaring a variable immediately after a label... weird.
+		skip_expr_range_stmt:; // NOTE(zhiayang): again, declaring a variable immediately after a label... weird.
+
 		Ast * lhs[2] = {rs->val0, rs->val1};
 		Type *rhs[2] = {val0, val1};
 
@@ -1472,8 +1610,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					found = scope_lookup_current(ctx->scope, str);
 				}
 				if (found == nullptr) {
-					bool is_immutable = false;
-					entity = alloc_entity_variable(ctx->scope, token, type, is_immutable, EntityState_Resolved);
+					entity = alloc_entity_variable(ctx->scope, token, type, EntityState_Resolved);
 					entity->flags |= EntityFlag_Value;
 					add_entity_definition(&ctx->checker->info, name, entity);
 				} else {
@@ -1501,12 +1638,21 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 		}
 
 		for (isize i = 0; i < entity_count; i++) {
-			add_entity(ctx->checker, ctx->scope, entities[i]->identifier, entities[i]);
+			Entity *e = entities[i];
+			DeclInfo *d = decl_info_of_entity(e);
+			GB_ASSERT(d == nullptr);
+			add_entity(ctx->checker, ctx->scope, e->identifier, e);
+			d = make_decl_info(ctx->allocator, ctx->scope, ctx->decl);
+			add_entity_and_decl_info(ctx, e->identifier, e, d);
 		}
 
 		check_stmt(ctx, rs->body, new_flags);
 
 		check_close_scope(ctx);
+	case_end;
+
+	case_ast_node(irs, InlineRangeStmt, node);
+		check_inline_range_stmt(ctx, node, mod_flags);
 	case_end;
 
 	case_ast_node(ss, SwitchStmt, node);
@@ -1667,11 +1813,9 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					if (!is_blank_ident(str)) {
 						found = scope_lookup_current(ctx->scope, str);
 						new_name_count += 1;
-					} else if (vd->is_static) {
-						error(name, "'static' is now allowed to be applied to '_'");
 					}
 					if (found == nullptr) {
-						entity = alloc_entity_variable(ctx->scope, token, nullptr, false);
+						entity = alloc_entity_variable(ctx->scope, token, nullptr);
 						entity->identifier = name;
 
 						Ast *fl = ctx->foreign_context.curr_library;
@@ -1679,9 +1823,6 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 							GB_ASSERT(fl->kind == Ast_Ident);
 							entity->Variable.is_foreign = true;
 							entity->Variable.foreign_library_ident = fl;
-						}
-						if (vd->is_static) {
-							entity->flags |= EntityFlag_Static;
 						}
 					} else {
 						TokenPos pos = found->token.pos;
@@ -1713,11 +1854,6 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					error(vd->type, "Invalid use of a polymorphic type '%s' in variable declaration", str);
 					gb_string_free(str);
 					init_type = t_invalid;
-				} else if (is_type_empty_union(init_type)) {
-					gbString str = type_to_string(init_type);
-					error(vd->type, "An empty union '%s' cannot be instantiated in variable declaration", str);
-					gb_string_free(str);
-					init_type = t_invalid;
 				}
 			}
 
@@ -1746,6 +1882,29 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 				if (ac.link_name.len > 0) {
 					e->Variable.link_name = ac.link_name;
 				}
+
+				e->flags &= ~EntityFlag_Static;
+				if (ac.is_static) {
+					String name = e->token.string;
+					if (name == "_") {
+						error(e->token, "The 'static' attribute is not allowed to be applied to '_'");
+					} else {
+						e->flags |= EntityFlag_Static;
+					}
+				}
+				if (ac.thread_local_model != "") {
+					String name = e->token.string;
+					if (name == "_") {
+						error(e->token, "The 'thread_local' attribute is not allowed to be applied to '_'");
+					} else {
+						e->flags |= EntityFlag_Static;
+					}
+					e->Variable.thread_local_model = ac.thread_local_model;
+				}
+
+				if (ac.is_static && ac.thread_local_model != "") {
+					error(e->token, "The 'static' attribute is not needed if 'thread_local' is applied");
+				}
 			}
 
 			check_arity_match(ctx, vd);
@@ -1753,6 +1912,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 
 			for (isize i = 0; i < entity_count; i++) {
 				Entity *e = entities[i];
+
 				if (e->Variable.is_foreign) {
 					if (vd->values.count > 0) {
 						error(e->token, "A foreign variable declaration cannot have a default value");
@@ -1807,7 +1967,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					// TODO(bill): Should a 'continue' happen here?
 				}
 
-				for (isize entity_index = 0; entity_index < entity_count; entity_index++) {
+				for (isize entity_index = 0; entity_index < 1; entity_index++) {
 					Entity *e = entities[entity_index];
 					if (e == nullptr) {
 						continue;
@@ -1815,7 +1975,6 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					if (e->kind != Entity_Variable) {
 						continue;
 					}
-					bool is_immutable = e->Variable.is_immutable;
 					String name = e->token.string;
 					Type *t = base_type(type_deref(e->type));
 
@@ -1826,8 +1985,8 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 						for_array(i, scope->elements.entries) {
 							Entity *f = scope->elements.entries[i].value;
 							if (f->kind == Entity_Variable) {
-								Entity *uvar = alloc_entity_using_variable(e, f->token, f->type);
-								uvar->Variable.is_immutable = is_immutable;
+								Entity *uvar = alloc_entity_using_variable(e, f->token, f->type, nullptr);
+								uvar->flags |= (e->flags & EntityFlag_Value);
 								Entity *prev = scope_insert(ctx->scope, uvar);
 								if (prev != nullptr) {
 									error(token, "Namespace collision while 'using' '%.*s' of: %.*s", LIT(name), LIT(prev->token.string));
@@ -1844,6 +2003,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					}
 				}
 			}
+
 		} else {
 			// constant value declaration
 			// NOTE(bill): Check `_` declarations

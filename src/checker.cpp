@@ -7,10 +7,12 @@ void check_expr(CheckerContext *c, Operand *operand, Ast *expression);
 bool is_operand_value(Operand o) {
 	switch (o.mode) {
 	case Addressing_Value:
+	case Addressing_Context:
 	case Addressing_Variable:
-	case Addressing_Immutable:
 	case Addressing_Constant:
 	case Addressing_MapIndex:
+	case Addressing_OptionalOk:
+	case Addressing_SoaVariable:
 		return true;
 	}
 	return false;
@@ -83,9 +85,13 @@ int entity_graph_node_cmp(EntityGraphNode **data, isize i, isize j) {
 	EntityGraphNode *y = data[j];
 	isize a = x->entity->order_in_src;
 	isize b = y->entity->order_in_src;
-	if (x->dep_count < y->dep_count) return -1;
-	if (x->dep_count > y->dep_count) return +1;
-	return a < b ? -1 : b > a;
+	if (x->dep_count < y->dep_count) {
+		return -1;
+	}
+	if (x->dep_count == y->dep_count) {
+		return a < b ? -1 : b > a;
+	}
+	return +1;
 }
 
 void entity_graph_node_swap(EntityGraphNode **data, isize i, isize j) {
@@ -326,7 +332,7 @@ void check_open_scope(CheckerContext *c, Ast *node) {
 		break;
 	}
 	c->scope = scope;
-	c->stmt_state_flags |= StmtStateFlag_bounds_check;
+	c->state_flags |= StateFlag_bounds_check;
 }
 
 void check_close_scope(CheckerContext *c) {
@@ -388,8 +394,7 @@ Entity *scope_lookup(Scope *s, String name) {
 
 
 
-Entity *scope_insert(Scope *s, Entity *entity) {
-	String name = entity->token.string;
+Entity *scope_insert_with_name(Scope *s, String name, Entity *entity) {
 	if (name == "") {
 		return nullptr;
 	}
@@ -399,11 +404,25 @@ Entity *scope_insert(Scope *s, Entity *entity) {
 	if (found) {
 		return *found;
 	}
+	if (s->parent != nullptr && (s->parent->flags & ScopeFlag_Proc) != 0) {
+		Entity **found = map_get(&s->parent->elements, key);
+		if (found) {
+			if ((*found)->flags & EntityFlag_Result) {
+				return *found;
+			}
+		}
+	}
+
 	map_set(&s->elements, key, entity);
 	if (entity->scope == nullptr) {
 		entity->scope = s;
 	}
 	return nullptr;
+}
+
+Entity *scope_insert(Scope *s, Entity *entity) {
+	String name = entity->token.string;
+	return scope_insert_with_name(s, name, entity);
 }
 
 
@@ -599,7 +618,7 @@ AstPackage *get_core_package(CheckerInfo *info, String name) {
 }
 
 
-void add_package_dependency(CheckerContext *c, char *package_name, char *name) {
+void add_package_dependency(CheckerContext *c, char const *package_name, char const *name) {
 	String n = make_string_c(name);
 	AstPackage *p = get_core_package(&c->checker->info, make_string_c(package_name));
 	Entity *e = scope_lookup(p->scope, n);
@@ -691,6 +710,7 @@ void init_universal(void) {
 	add_global_string_constant(str_lit("ODIN_VERSION"), bc->ODIN_VERSION);
 	add_global_string_constant(str_lit("ODIN_ROOT"),    bc->ODIN_ROOT);
 	add_global_constant(str_lit("ODIN_DEBUG"), t_untyped_bool, exact_value_bool(bc->ODIN_DEBUG));
+	add_global_constant(str_lit("ODIN_DISABLE_ASSERT"), t_untyped_bool, exact_value_bool(bc->ODIN_DISABLE_ASSERT));
 
 
 // Builtin Procedures
@@ -710,6 +730,53 @@ void init_universal(void) {
 				break;
 			}
 		}
+	}
+
+	// TODO(bill): Set the correct arch for this
+	if (bc->metrics.arch == TargetArch_amd64 || bc->metrics.arch == TargetArch_386) {
+		t_vector_x86_mmx = alloc_type(Type_SimdVector);
+		t_vector_x86_mmx->SimdVector.is_x86_mmx = true;
+
+		Entity *entity = alloc_entity(Entity_TypeName, nullptr, make_token_ident(str_lit("x86_mmx")), t_vector_x86_mmx);
+		add_global_entity(entity, intrinsics_pkg->scope);
+	}
+
+	bool defined_values_double_declaration = false;
+	for_array(i, bc->defined_values.entries) {
+		String name = bc->defined_values.entries[i].key.string;
+		ExactValue value = bc->defined_values.entries[i].value;
+		GB_ASSERT(value.kind != ExactValue_Invalid);
+
+		Type *type = nullptr;
+		switch (value.kind) {
+		case ExactValue_Bool:
+			type = t_untyped_bool;
+			break;
+		case ExactValue_String:
+			type = t_untyped_string;
+			break;
+		case ExactValue_Integer:
+			type = t_untyped_integer;
+			break;
+		case ExactValue_Float:
+			type = t_untyped_float;
+			break;
+		}
+		GB_ASSERT(type != nullptr);
+
+
+
+		Entity *entity = alloc_entity_constant(nullptr, make_token_ident(name), type, value);
+		entity->state = EntityState_Resolved;
+		if (scope_insert(builtin_pkg->scope, entity)) {
+			error(entity->token, "'%.*s' defined as an argument is already declared at the global scope", LIT(name));
+			defined_values_double_declaration = true;
+			// NOTE(bill): Just exit early before anything, even though the compiler will do that anyway
+		}
+	}
+
+	if (defined_values_double_declaration) {
+		gb_exit(1);
 	}
 
 
@@ -737,6 +804,12 @@ void init_checker_info(CheckerInfo *i) {
 	map_init(&i->files,           a);
 	map_init(&i->packages,        a);
 	array_init(&i->variable_init_order, a);
+	array_init(&i->required_foreign_imports_through_force, a);
+
+	i->allow_identifier_uses = build_context.query_data_set_settings.kind == QueryDataSet_GoToDefinitions;
+	if (i->allow_identifier_uses) {
+		array_init(&i->identifier_uses, a);
+	}
 }
 
 void destroy_checker_info(CheckerInfo *i) {
@@ -751,6 +824,9 @@ void destroy_checker_info(CheckerInfo *i) {
 	map_destroy(&i->files);
 	map_destroy(&i->packages);
 	array_free(&i->variable_init_order);
+	array_free(&i->identifier_uses);
+	array_free(&i->required_foreign_imports_through_force);
+
 }
 
 CheckerContext make_checker_context(Checker *c) {
@@ -773,13 +849,14 @@ void destroy_checker_context(CheckerContext *ctx) {
 	destroy_checker_poly_path(ctx->poly_path);
 }
 
-void init_checker(Checker *c, Parser *parser) {
+bool init_checker(Checker *c, Parser *parser) {
+	c->parser = parser;
+
 	if (global_error_collector.count > 0) {
-		gb_exit(1);
+		return false;
 	}
 	gbAllocator a = heap_allocator();
 
-	c->parser = parser;
 	init_checker_info(&c->info);
 
 	array_init(&c->procs_to_check, a);
@@ -793,6 +870,7 @@ void init_checker(Checker *c, Parser *parser) {
 	c->allocator = heap_allocator();
 
 	c->init_ctx = make_checker_context(c);
+	return true;
 }
 
 void destroy_checker(Checker *c) {
@@ -956,7 +1034,11 @@ void add_type_and_value(CheckerInfo *i, Ast *expr, AddressingMode mode, Type *ty
 
 	expr->tav.mode = mode;
 	expr->tav.type = type;
-	expr->tav.value = value;
+	if (mode == Addressing_Constant || mode == Addressing_Invalid) {
+		expr->tav.value = value;
+	} else if (mode == Addressing_Value && is_type_typeid(type)) {
+		expr->tav.value = value;
+	}
 }
 
 void add_entity_definition(CheckerInfo *i, Ast *identifier, Entity *entity) {
@@ -970,51 +1052,75 @@ void add_entity_definition(CheckerInfo *i, Ast *identifier, Entity *entity) {
 		return;
 	}
 	GB_ASSERT(entity != nullptr);
-
 	identifier->Ident.entity = entity;
 	entity->identifier = identifier;
 	array_add(&i->definitions, entity);
 }
 
-bool add_entity(Checker *c, Scope *scope, Ast *identifier, Entity *entity) {
+bool redeclaration_error(String name, Entity *prev, Entity *found) {
+	TokenPos pos = found->token.pos;
+	Entity *up = found->using_parent;
+	if (up != nullptr) {
+		if (pos == up->token.pos) {
+			// NOTE(bill): Error should have been handled already
+			return false;
+		}
+		if (found->flags & EntityFlag_Result) {
+			error(prev->token,
+			      "Direct shadowing of the named return value '%.*s' in this scope through 'using'\n"
+			      "\tat %.*s(%td:%td)",
+			      LIT(name),
+			      LIT(up->token.pos.file), up->token.pos.line, up->token.pos.column);
+		} else {
+			error(prev->token,
+			      "Redeclaration of '%.*s' in this scope through 'using'\n"
+			      "\tat %.*s(%td:%td)",
+			      LIT(name),
+			      LIT(up->token.pos.file), up->token.pos.line, up->token.pos.column);
+		}
+	} else {
+		if (pos == prev->token.pos) {
+			// NOTE(bill): Error should have been handled already
+			return false;
+		}
+		if (found->flags & EntityFlag_Result) {
+			error(prev->token,
+			      "Direct shadowing of the named return value '%.*s' in this scope\n"
+			      "\tat %.*s(%td:%td)",
+			      LIT(name),
+			      LIT(pos.file), pos.line, pos.column);
+		} else {
+			error(prev->token,
+			      "Redeclaration of '%.*s' in this scope\n"
+			      "\tat %.*s(%td:%td)",
+			      LIT(name),
+			      LIT(pos.file), pos.line, pos.column);
+		}
+	}
+	return false;
+}
+
+bool add_entity_with_name(Checker *c, Scope *scope, Ast *identifier, Entity *entity, String name) {
 	if (scope == nullptr) {
 		return false;
 	}
-	String name = entity->token.string;
 	if (!is_blank_ident(name)) {
 		Entity *ie = scope_insert(scope, entity);
 		if (ie != nullptr) {
-			TokenPos pos = ie->token.pos;
-			Entity *up = ie->using_parent;
-			if (up != nullptr) {
-				if (pos == up->token.pos) {
-					// NOTE(bill): Error should have been handled already
-					return false;
-				}
-				error(entity->token,
-				      "Redeclaration of '%.*s' in this scope through 'using'\n"
-				      "\tat %.*s(%td:%td)",
-				      LIT(name),
-				      LIT(up->token.pos.file), up->token.pos.line, up->token.pos.column);
-				return false;
-			} else {
-				if (pos == entity->token.pos) {
-					// NOTE(bill): Error should have been handled already
-					return false;
-				}
-				error(entity->token,
-				      "Redeclaration of '%.*s' in this scope\n"
-				      "\tat %.*s(%td:%td)",
-				      LIT(name),
-				      LIT(pos.file), pos.line, pos.column);
-				return false;
-			}
+			return redeclaration_error(name, entity, ie);
 		}
 	}
 	if (identifier != nullptr) {
+		if (entity->file == nullptr) {
+			GB_ASSERT(c->curr_ctx != nullptr);
+			entity->file = c->curr_ctx->file;
+		}
 		add_entity_definition(&c->info, identifier, entity);
 	}
 	return true;
+}
+bool add_entity(Checker *c, Scope *scope, Ast *identifier, Entity *entity) {
+	return add_entity_with_name(c, scope, identifier, entity, entity->token.string);
 }
 
 void add_entity_use(CheckerContext *c, Ast *identifier, Entity *entity) {
@@ -1030,6 +1136,10 @@ void add_entity_use(CheckerContext *c, Ast *identifier, Entity *entity) {
 		}
 		identifier->Ident.entity = entity;
 
+		if (c->info->allow_identifier_uses) {
+			array_add(&c->info->identifier_uses, identifier);
+		}
+
 		String dmsg = entity->deprecated_message;
 		if (dmsg.len > 0) {
 			warning(identifier, "%.*s is deprecated: %.*s", LIT(entity->token.string), LIT(dmsg));
@@ -1038,13 +1148,13 @@ void add_entity_use(CheckerContext *c, Ast *identifier, Entity *entity) {
 	entity->flags |= EntityFlag_Used;
 	add_declaration_dependency(c, entity);
 	if (entity_has_deferred_procedure(entity)) {
-		Entity *deferred = entity->Procedure.deferred_procedure;
+		Entity *deferred = entity->Procedure.deferred_procedure.entity;
 		add_entity_use(c, nullptr, deferred);
 	}
 }
 
 
-void add_entity_and_decl_info(CheckerContext *c, Ast *identifier, Entity *e, DeclInfo *d) {
+void add_entity_and_decl_info(CheckerContext *c, Ast *identifier, Entity *e, DeclInfo *d, bool is_exported) {
 	GB_ASSERT(identifier->kind == Ast_Ident);
 	GB_ASSERT(e != nullptr && d != nullptr);
 	GB_ASSERT(identifier->Ident.token.string == e->token.string);
@@ -1053,7 +1163,7 @@ void add_entity_and_decl_info(CheckerContext *c, Ast *identifier, Entity *e, Dec
 		Scope *scope = e->scope;
 
 		if (scope->flags & ScopeFlag_File) {
-			if (is_entity_kind_exported(e->kind)) {
+			if (is_entity_kind_exported(e->kind) && is_exported) {
 				AstPackage *pkg = scope->file->pkg;
 				GB_ASSERT(pkg->scope == scope->parent);
 				GB_ASSERT(c->pkg == pkg);
@@ -1066,6 +1176,7 @@ void add_entity_and_decl_info(CheckerContext *c, Ast *identifier, Entity *e, Dec
 	add_entity_definition(&c->checker->info, identifier, e);
 	GB_ASSERT(e->decl_info == nullptr);
 	e->decl_info = d;
+	d->entity = e;
 	array_add(&c->checker->info.entities, e);
 	e->order_in_src = c->checker->info.entities.count;
 	e->pkg = c->pkg;
@@ -1147,6 +1258,9 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 		break;
 	case Type_Basic:
 		switch (bt->Basic.kind) {
+		case Basic_cstring:
+			add_type_info_type(c, t_u8_ptr);
+			break;
 		case Basic_string:
 			add_type_info_type(c, t_u8_ptr);
 			add_type_info_type(c, t_int);
@@ -1166,6 +1280,14 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 			add_type_info_type(c, t_type_info_float);
 			add_type_info_type(c, t_f64);
 			break;
+		case Basic_quaternion128:
+			add_type_info_type(c, t_type_info_float);
+			add_type_info_type(c, t_f32);
+			break;
+		case Basic_quaternion256:
+			add_type_info_type(c, t_type_info_float);
+			add_type_info_type(c, t_f64);
+			break;
 		}
 		break;
 
@@ -1178,6 +1300,14 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 		add_type_info_type(c, alloc_type_pointer(bt->Array.elem));
 		add_type_info_type(c, t_int);
 		break;
+
+	case Type_EnumeratedArray:
+		add_type_info_type(c, bt->EnumeratedArray.index);
+		add_type_info_type(c, t_int);
+		add_type_info_type(c, bt->EnumeratedArray.elem);
+		add_type_info_type(c, alloc_type_pointer(bt->EnumeratedArray.elem));
+		break;
+
 	case Type_DynamicArray:
 		add_type_info_type(c, bt->DynamicArray.elem);
 		add_type_info_type(c, alloc_type_pointer(bt->DynamicArray.elem));
@@ -1220,7 +1350,18 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 		if (bt->Struct.scope != nullptr) {
 			for_array(i, bt->Struct.scope->elements.entries) {
 				Entity *e = bt->Struct.scope->elements.entries[i].value;
-				add_type_info_type(c, e->type);
+				switch (bt->Struct.soa_kind) {
+				case StructSoa_Dynamic:
+					add_type_info_type(c, t_allocator);
+					/*fallthrough*/
+				case StructSoa_Slice:
+				case StructSoa_Fixed:
+					add_type_info_type(c, alloc_type_pointer(e->type));
+					break;
+				default:
+					add_type_info_type(c, e->type);
+					break;
+				}
 			}
 		}
 		for_array(i, bt->Struct.fields) {
@@ -1246,6 +1387,10 @@ void add_type_info_type(CheckerContext *c, Type *t) {
 	case Type_Proc:
 		add_type_info_type(c, bt->Proc.params);
 		add_type_info_type(c, bt->Proc.results);
+		break;
+
+	case Type_SimdVector:
+		add_type_info_type(c, bt->SimdVector.elem);
 		break;
 
 	default:
@@ -1278,6 +1423,7 @@ void add_curr_ast_file(CheckerContext *ctx, AstFile *file) {
 		ctx->decl  = file->pkg->decl_info;
 		ctx->scope = file->scope;
 		ctx->pkg   = file->pkg;
+		ctx->checker->curr_ctx = ctx;
 	}
 }
 
@@ -1298,7 +1444,12 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 
 	auto *set = &c->info.minimum_dependency_type_info_set;
 
-	isize ti_index = type_info_index(&c->info, t);
+	isize ti_index = type_info_index(&c->info, t, false);
+	if (ti_index < 0) {
+		add_type_info_type(&c->init_ctx, t); // Missing the type information
+		ti_index = type_info_index(&c->info, t, false);
+	}
+	GB_ASSERT(ti_index >= 0);
 	if (ptr_set_exists(set, ti_index)) {
 		// Type Already exists
 		return;
@@ -1337,6 +1488,14 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 			add_min_dep_type_info(c, t_type_info_float);
 			add_min_dep_type_info(c, t_f64);
 			break;
+		case Basic_quaternion128:
+			add_min_dep_type_info(c, t_type_info_float);
+			add_min_dep_type_info(c, t_f32);
+			break;
+		case Basic_quaternion256:
+			add_min_dep_type_info(c, t_type_info_float);
+			add_min_dep_type_info(c, t_f64);
+			break;
 		}
 		break;
 
@@ -1358,6 +1517,13 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 		add_min_dep_type_info(c, alloc_type_pointer(bt->Array.elem));
 		add_min_dep_type_info(c, t_int);
 		break;
+	case Type_EnumeratedArray:
+		add_min_dep_type_info(c, bt->EnumeratedArray.index);
+		add_min_dep_type_info(c, bt->EnumeratedArray.elem);
+		add_min_dep_type_info(c, alloc_type_pointer(bt->EnumeratedArray.elem));
+		add_min_dep_type_info(c, t_int);
+		break;
+
 	case Type_DynamicArray:
 		add_min_dep_type_info(c, bt->DynamicArray.elem);
 		add_min_dep_type_info(c, alloc_type_pointer(bt->DynamicArray.elem));
@@ -1383,15 +1549,15 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 		break;
 
 	case Type_Struct:
+		for_array(i, bt->Struct.fields) {
+			Entity *f = bt->Struct.fields[i];
+			add_min_dep_type_info(c, f->type);
+		}
 		if (bt->Struct.scope != nullptr) {
 			for_array(i, bt->Struct.scope->elements.entries) {
 				Entity *e = bt->Struct.scope->elements.entries[i].value;
 				add_min_dep_type_info(c, e->type);
 			}
-		}
-		for_array(i, bt->Struct.fields) {
-			Entity *f = bt->Struct.fields[i];
-			add_min_dep_type_info(c, f->type);
 		}
 		break;
 
@@ -1417,6 +1583,10 @@ void add_min_dep_type_info(Checker *c, Type *t) {
 	case Type_Proc:
 		add_min_dep_type_info(c, bt->Proc.params);
 		add_min_dep_type_info(c, bt->Proc.results);
+		break;
+
+	case Type_SimdVector:
+		add_min_dep_type_info(c, bt->SimdVector.elem);
 		break;
 
 	default:
@@ -1490,19 +1660,33 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	ptr_set_init(&c->info.minimum_dependency_type_info_set, heap_allocator());
 
 	String required_runtime_entities[] = {
+		str_lit("Allocator"),
+		str_lit("Logger"),
+		str_lit("mem_zero"),
+
 		str_lit("__init_context"),
-		str_lit("default_assertion_failure_proc"),
 
 		str_lit("args__"),
 		str_lit("type_table"),
-		str_lit("global_scratch_allocator"),
+		str_lit("__type_info_of"),
+		str_lit("default_temp_allocator"),
+		str_lit("default_temp_allocator_init"),
+		str_lit("default_temp_allocator_destroy"),
+		str_lit("default_temp_allocator_proc"),
 
 		str_lit("Type_Info"),
 		str_lit("Source_Code_Location"),
 		str_lit("Context"),
 
-		str_lit("quo_complex64"),
-		str_lit("quo_complex128"),
+		str_lit("cstring_to_string"), // Is tihs needed?
+
+		str_lit("umodti3"),
+		str_lit("udivti3"),
+
+		str_lit("memset"),
+
+		str_lit("memory_compare"),
+		str_lit("memory_compare_zero"),
 	};
 	for (isize i = 0; i < gb_count_of(required_runtime_entities); i++) {
 		add_dependency_to_set(c, scope_lookup(c->info.runtime_package->scope, required_runtime_entities[i]));
@@ -1513,21 +1697,12 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 			// NOTE(bill): Only if these exist
 			str_lit("memcpy"),
 			str_lit("memmove"),
-			str_lit("memset"),
-			// str_lit("memcmp"),
+			str_lit("_tls_index"),
+			str_lit("_fltused"),
 		};
 		for (isize i = 0; i < gb_count_of(required_no_crt_entities); i++) {
 			add_dependency_to_set(c, scope_lookup(c->info.runtime_package->scope, required_no_crt_entities[i]));
 		}
-	}
-
-	AstPackage *mem = get_core_package(&c->info, str_lit("mem"));
-	String required_mem_entities[] = {
-		str_lit("zero"),
-		str_lit("Allocator"),
-	};
-	for (isize i = 0; i < gb_count_of(required_mem_entities); i++) {
-		add_dependency_to_set(c, scope_lookup(mem->scope, required_mem_entities[i]));
 	}
 
 	AstPackage *os = get_core_package(&c->info, str_lit("os"));
@@ -1542,7 +1717,8 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 	if (!build_context.no_bounds_check) {
 		String bounds_check_entities[] = {
 			str_lit("bounds_check_error"),
-			str_lit("slice_expr_error"),
+			str_lit("slice_expr_error_hi"),
+			str_lit("slice_expr_error_lo_hi"),
 			str_lit("dynamic_array_expr_error"),
 		};
 		for (isize i = 0; i < gb_count_of(bounds_check_entities); i++) {
@@ -1558,9 +1734,14 @@ void generate_minimum_dependency_set(Checker *c, Entity *start) {
 			}
 		} else if (e->kind == Entity_Procedure && e->Procedure.is_export) {
 			add_dependency_to_set(c, e);
-		} else if (e->kind == Entity_Variable && e->Procedure.is_export) {
+		} else if (e->kind == Entity_Variable && e->Variable.is_export) {
 			add_dependency_to_set(c, e);
 		}
+	}
+
+	for_array(i, c->info.required_foreign_imports_through_force) {
+		Entity *e = c->info.required_foreign_imports_through_force[i];
+		add_dependency_to_set(c, e);
 	}
 
 	add_dependency_to_set(c, start);
@@ -1570,9 +1751,10 @@ bool is_entity_a_dependency(Entity *e) {
 	if (e == nullptr) return false;
 	switch (e->kind) {
 	case Entity_Procedure:
-	case Entity_Variable:
-	case Entity_Constant:
 		return true;
+	case Entity_Constant:
+	case Entity_Variable:
+		return e->pkg != nullptr;
 	}
 	return false;
 }
@@ -1593,28 +1775,35 @@ Array<EntityGraphNode *> generate_entity_dependency_graph(CheckerInfo *info) {
 		}
 	}
 
+#define TIME_SECTION(str) do { if (build_context.show_more_timings) timings_start_section(&global_timings, str_lit(str)); } while (0)
+
+
+	TIME_SECTION("generate_entity_dependency_graph: Calculate edges for graph M - Part 1");
 	// Calculate edges for graph M
 	for_array(i, M.entries) {
 		Entity *   e = cast(Entity *)M.entries[i].key.ptr;
 		EntityGraphNode *n = M.entries[i].value;
 
 		DeclInfo *decl = decl_info_of_entity(e);
-		if (decl != nullptr) {
-			for_array(j, decl->deps.entries) {
-				auto entry = decl->deps.entries[j];
-				Entity *dep = entry.ptr;
-				if (dep && is_entity_a_dependency(dep)) {
-					EntityGraphNode **m_ = map_get(&M, hash_pointer(dep));
-					if (m_ != nullptr) {
-						EntityGraphNode *m = *m_;
-						entity_graph_node_set_add(&n->succ, m);
-						entity_graph_node_set_add(&m->pred, n);
-					}
-				}
+		GB_ASSERT(decl != nullptr);
+
+		for_array(j, decl->deps.entries) {
+			Entity *dep = decl->deps.entries[j].ptr;
+			GB_ASSERT(dep != nullptr);
+			if (is_entity_a_dependency(dep)) {
+				EntityGraphNode **m_ = map_get(&M, hash_pointer(dep));
+				GB_ASSERT(m_ != nullptr);
+				EntityGraphNode *m = *m_;
+				entity_graph_node_set_add(&n->succ, m);
+				entity_graph_node_set_add(&m->pred, n);
 			}
 		}
 	}
 
+	// TODO(bill): This could be multithreaded to improve performance
+	// This means that the entity graph node set will have to be thread safe
+
+	TIME_SECTION("generate_entity_dependency_graph: Calculate edges for graph M - Part 2");
 	auto G = array_make<EntityGraphNode *>(a, 0, M.entries.count);
 
 	for_array(i, M.entries) {
@@ -1651,17 +1840,22 @@ Array<EntityGraphNode *> generate_entity_dependency_graph(CheckerInfo *info) {
 		}
 	}
 
+	TIME_SECTION("generate_entity_dependency_graph: Dependency Count Checker");
 	for_array(i, G) {
 		EntityGraphNode *n = G[i];
 		n->index = i;
 		n->dep_count = n->succ.entries.count;
+
 		GB_ASSERT(n->dep_count >= 0);
 	}
 
 	return G;
+
+#undef TIME_SECTION
 }
 
 
+void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d);
 
 
 Entity *find_core_entity(Checker *c, String name) {
@@ -1681,6 +1875,10 @@ Type *find_core_type(Checker *c, String name) {
 , LIT(name));
 		// NOTE(bill): This will exit the program as it's cannot continue without it!
 	}
+	if (e->type == nullptr) {
+		check_single_global_entity(c, e, e->decl_info);
+	}
+	GB_ASSERT(e->type != nullptr);
 	return e->type;
 }
 
@@ -1773,58 +1971,64 @@ void init_core_type_info(Checker *c) {
 	Type *tiv_type = type_info_variant->type;
 	GB_ASSERT(is_type_union(tiv_type));
 
-	t_type_info_named         = find_core_type(c, str_lit("Type_Info_Named"));
-	t_type_info_integer       = find_core_type(c, str_lit("Type_Info_Integer"));
-	t_type_info_rune          = find_core_type(c, str_lit("Type_Info_Rune"));
-	t_type_info_float         = find_core_type(c, str_lit("Type_Info_Float"));
-	t_type_info_complex       = find_core_type(c, str_lit("Type_Info_Complex"));
-	t_type_info_string        = find_core_type(c, str_lit("Type_Info_String"));
-	t_type_info_boolean       = find_core_type(c, str_lit("Type_Info_Boolean"));
-	t_type_info_any           = find_core_type(c, str_lit("Type_Info_Any"));
-	t_type_info_typeid        = find_core_type(c, str_lit("Type_Info_Type_Id"));
-	t_type_info_pointer       = find_core_type(c, str_lit("Type_Info_Pointer"));
-	t_type_info_procedure     = find_core_type(c, str_lit("Type_Info_Procedure"));
-	t_type_info_array         = find_core_type(c, str_lit("Type_Info_Array"));
-	t_type_info_dynamic_array = find_core_type(c, str_lit("Type_Info_Dynamic_Array"));
-	t_type_info_slice         = find_core_type(c, str_lit("Type_Info_Slice"));
-	t_type_info_tuple         = find_core_type(c, str_lit("Type_Info_Tuple"));
-	t_type_info_struct        = find_core_type(c, str_lit("Type_Info_Struct"));
-	t_type_info_union         = find_core_type(c, str_lit("Type_Info_Union"));
-	t_type_info_enum          = find_core_type(c, str_lit("Type_Info_Enum"));
-	t_type_info_map           = find_core_type(c, str_lit("Type_Info_Map"));
-	t_type_info_bit_field     = find_core_type(c, str_lit("Type_Info_Bit_Field"));
-	t_type_info_bit_set       = find_core_type(c, str_lit("Type_Info_Bit_Set"));
-	t_type_info_opaque        = find_core_type(c, str_lit("Type_Info_Opaque"));
+	t_type_info_named            = find_core_type(c, str_lit("Type_Info_Named"));
+	t_type_info_integer          = find_core_type(c, str_lit("Type_Info_Integer"));
+	t_type_info_rune             = find_core_type(c, str_lit("Type_Info_Rune"));
+	t_type_info_float            = find_core_type(c, str_lit("Type_Info_Float"));
+	t_type_info_quaternion       = find_core_type(c, str_lit("Type_Info_Quaternion"));
+	t_type_info_complex          = find_core_type(c, str_lit("Type_Info_Complex"));
+	t_type_info_string           = find_core_type(c, str_lit("Type_Info_String"));
+	t_type_info_boolean          = find_core_type(c, str_lit("Type_Info_Boolean"));
+	t_type_info_any              = find_core_type(c, str_lit("Type_Info_Any"));
+	t_type_info_typeid           = find_core_type(c, str_lit("Type_Info_Type_Id"));
+	t_type_info_pointer          = find_core_type(c, str_lit("Type_Info_Pointer"));
+	t_type_info_procedure        = find_core_type(c, str_lit("Type_Info_Procedure"));
+	t_type_info_array            = find_core_type(c, str_lit("Type_Info_Array"));
+	t_type_info_enumerated_array = find_core_type(c, str_lit("Type_Info_Enumerated_Array"));
+	t_type_info_dynamic_array    = find_core_type(c, str_lit("Type_Info_Dynamic_Array"));
+	t_type_info_slice            = find_core_type(c, str_lit("Type_Info_Slice"));
+	t_type_info_tuple            = find_core_type(c, str_lit("Type_Info_Tuple"));
+	t_type_info_struct           = find_core_type(c, str_lit("Type_Info_Struct"));
+	t_type_info_union            = find_core_type(c, str_lit("Type_Info_Union"));
+	t_type_info_enum             = find_core_type(c, str_lit("Type_Info_Enum"));
+	t_type_info_map              = find_core_type(c, str_lit("Type_Info_Map"));
+	t_type_info_bit_field        = find_core_type(c, str_lit("Type_Info_Bit_Field"));
+	t_type_info_bit_set          = find_core_type(c, str_lit("Type_Info_Bit_Set"));
+	t_type_info_opaque           = find_core_type(c, str_lit("Type_Info_Opaque"));
+	t_type_info_simd_vector      = find_core_type(c, str_lit("Type_Info_Simd_Vector"));
 
-	t_type_info_named_ptr         = alloc_type_pointer(t_type_info_named);
-	t_type_info_integer_ptr       = alloc_type_pointer(t_type_info_integer);
-	t_type_info_rune_ptr          = alloc_type_pointer(t_type_info_rune);
-	t_type_info_float_ptr         = alloc_type_pointer(t_type_info_float);
-	t_type_info_complex_ptr       = alloc_type_pointer(t_type_info_complex);
-	t_type_info_string_ptr        = alloc_type_pointer(t_type_info_string);
-	t_type_info_boolean_ptr       = alloc_type_pointer(t_type_info_boolean);
-	t_type_info_any_ptr           = alloc_type_pointer(t_type_info_any);
-	t_type_info_typeid_ptr        = alloc_type_pointer(t_type_info_typeid);
-	t_type_info_pointer_ptr       = alloc_type_pointer(t_type_info_pointer);
-	t_type_info_procedure_ptr     = alloc_type_pointer(t_type_info_procedure);
-	t_type_info_array_ptr         = alloc_type_pointer(t_type_info_array);
-	t_type_info_dynamic_array_ptr = alloc_type_pointer(t_type_info_dynamic_array);
-	t_type_info_slice_ptr         = alloc_type_pointer(t_type_info_slice);
-	t_type_info_tuple_ptr         = alloc_type_pointer(t_type_info_tuple);
-	t_type_info_struct_ptr        = alloc_type_pointer(t_type_info_struct);
-	t_type_info_union_ptr         = alloc_type_pointer(t_type_info_union);
-	t_type_info_enum_ptr          = alloc_type_pointer(t_type_info_enum);
-	t_type_info_map_ptr           = alloc_type_pointer(t_type_info_map);
-	t_type_info_bit_field_ptr     = alloc_type_pointer(t_type_info_bit_field);
-	t_type_info_bit_set_ptr       = alloc_type_pointer(t_type_info_bit_set);
-	t_type_info_opaque_ptr        = alloc_type_pointer(t_type_info_opaque);
+	t_type_info_named_ptr            = alloc_type_pointer(t_type_info_named);
+	t_type_info_integer_ptr          = alloc_type_pointer(t_type_info_integer);
+	t_type_info_rune_ptr             = alloc_type_pointer(t_type_info_rune);
+	t_type_info_float_ptr            = alloc_type_pointer(t_type_info_float);
+	t_type_info_quaternion_ptr       = alloc_type_pointer(t_type_info_quaternion);
+	t_type_info_complex_ptr          = alloc_type_pointer(t_type_info_complex);
+	t_type_info_string_ptr           = alloc_type_pointer(t_type_info_string);
+	t_type_info_boolean_ptr          = alloc_type_pointer(t_type_info_boolean);
+	t_type_info_any_ptr              = alloc_type_pointer(t_type_info_any);
+	t_type_info_typeid_ptr           = alloc_type_pointer(t_type_info_typeid);
+	t_type_info_pointer_ptr          = alloc_type_pointer(t_type_info_pointer);
+	t_type_info_procedure_ptr        = alloc_type_pointer(t_type_info_procedure);
+	t_type_info_array_ptr            = alloc_type_pointer(t_type_info_array);
+	t_type_info_enumerated_array_ptr = alloc_type_pointer(t_type_info_enumerated_array);
+	t_type_info_dynamic_array_ptr    = alloc_type_pointer(t_type_info_dynamic_array);
+	t_type_info_slice_ptr            = alloc_type_pointer(t_type_info_slice);
+	t_type_info_tuple_ptr            = alloc_type_pointer(t_type_info_tuple);
+	t_type_info_struct_ptr           = alloc_type_pointer(t_type_info_struct);
+	t_type_info_union_ptr            = alloc_type_pointer(t_type_info_union);
+	t_type_info_enum_ptr             = alloc_type_pointer(t_type_info_enum);
+	t_type_info_map_ptr              = alloc_type_pointer(t_type_info_map);
+	t_type_info_bit_field_ptr        = alloc_type_pointer(t_type_info_bit_field);
+	t_type_info_bit_set_ptr          = alloc_type_pointer(t_type_info_bit_set);
+	t_type_info_opaque_ptr           = alloc_type_pointer(t_type_info_opaque);
+	t_type_info_simd_vector_ptr      = alloc_type_pointer(t_type_info_simd_vector);
 }
 
 void init_mem_allocator(Checker *c) {
 	if (t_allocator != nullptr) {
 		return;
 	}
-	AstPackage *pkg = get_core_package(&c->info, str_lit("mem"));
+	AstPackage *pkg = get_core_package(&c->info, str_lit("runtime"));
 
 	String name = str_lit("Allocator");
 	Entity *e = scope_lookup_current(pkg->scope, name);
@@ -1842,6 +2046,7 @@ void init_core_context(Checker *c) {
 		return;
 	}
 	t_context = find_core_type(c, str_lit("Context"));
+	GB_ASSERT(t_context != nullptr);
 	t_context_ptr = alloc_type_pointer(t_context);
 }
 
@@ -1927,29 +2132,217 @@ DECL_ATTRIBUTE_PROC(foreign_block_decl_attribute) {
 			error(elem, "Expected a string value for '%.*s'", LIT(name));
 		}
 		return true;
+	} else if (name == "private") {
+		EntityVisiblityKind kind = EntityVisiblity_PrivateToPackage;
+		if (ev.kind == ExactValue_Invalid) {
+			// Okay
+		} else if (ev.kind == ExactValue_String) {
+			String v = ev.value_string;
+			if (v == "file") {
+				kind = EntityVisiblity_PrivateToFile;
+			} else if (v == "package") {
+				kind = EntityVisiblity_PrivateToPackage;
+			} else {
+				error(value, "'%.*s'  expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
+			}
+		} else {
+			error(value, "'%.*s'  expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
+		}
+		c->foreign_context.visibility_kind = kind;
+		return true;
 	}
 
 	return false;
 }
 
 DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
-	ExactValue ev = {};
-	if (name != "deferred") {
-		ev = check_decl_attribute_value(c, value);
-	}
-
-	if (name == "deferred") {
+	if (name == "export") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+		if (ev.kind == ExactValue_Invalid) {
+			ac->is_export = true;
+		} else if (ev.kind == ExactValue_Bool) {
+			ac->is_export = ev.value_bool;
+		} else {
+			error(value, "Expected either a boolean or no parameter for 'export'");
+			return false;
+		}
+		return true;
+	} else if (name == "deferred") {
 		if (value != nullptr) {
 			Operand o = {};
 			check_expr(c, &o, value);
-			Entity *e = entity_of_ident(o.expr);
+			Entity *e = entity_of_node(o.expr);
 			if (e != nullptr && e->kind == Entity_Procedure) {
-				ac->deferred_procedure = e;
+				warning(elem, "'%.*s' is deprecated, please use one of the following instead: 'deferred_none', 'deferred_in', 'deferred_out'", LIT(name));
+				if (ac->deferred_procedure.entity != nullptr) {
+					error(elem, "Previous usage of a 'deferred_*' attribute");
+				}
+				ac->deferred_procedure.kind = DeferredProcedure_out;
+				ac->deferred_procedure.entity = e;
 				return true;
 			}
 		}
 		error(elem, "Expected a procedure entity for '%.*s'", LIT(name));
 		return false;
+	} else if (name == "deferred_none") {
+		if (value != nullptr) {
+			Operand o = {};
+			check_expr(c, &o, value);
+			Entity *e = entity_of_node(o.expr);
+			if (e != nullptr && e->kind == Entity_Procedure) {
+				ac->deferred_procedure.kind = DeferredProcedure_none;
+				ac->deferred_procedure.entity = e;
+				return true;
+			}
+		}
+		error(elem, "Expected a procedure entity for '%.*s'", LIT(name));
+		return false;
+	} else if (name == "deferred_in") {
+		if (value != nullptr) {
+			Operand o = {};
+			check_expr(c, &o, value);
+			Entity *e = entity_of_node(o.expr);
+			if (e != nullptr && e->kind == Entity_Procedure) {
+				if (ac->deferred_procedure.entity != nullptr) {
+					error(elem, "Previous usage of a 'deferred_*' attribute");
+				}
+				ac->deferred_procedure.kind = DeferredProcedure_in;
+				ac->deferred_procedure.entity = e;
+				return true;
+			}
+		}
+		error(elem, "Expected a procedure entity for '%.*s'", LIT(name));
+		return false;
+	} else if (name == "deferred_out") {
+		if (value != nullptr) {
+			Operand o = {};
+			check_expr(c, &o, value);
+			Entity *e = entity_of_node(o.expr);
+			if (e != nullptr && e->kind == Entity_Procedure) {
+				if (ac->deferred_procedure.entity != nullptr) {
+					error(elem, "Previous usage of a 'deferred_*' attribute");
+				}
+				ac->deferred_procedure.kind = DeferredProcedure_out;
+				ac->deferred_procedure.entity = e;
+				return true;
+			}
+		}
+		error(elem, "Expected a procedure entity for '%.*s'", LIT(name));
+		return false;
+	} else if (name == "link_name") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+
+		if (ev.kind == ExactValue_String) {
+			ac->link_name = ev.value_string;
+			if (!is_foreign_name_valid(ac->link_name)) {
+				error(elem, "Invalid link name: %.*s", LIT(ac->link_name));
+			}
+		} else {
+			error(elem, "Expected a string value for '%.*s'", LIT(name));
+		}
+		return true;
+	} else if (name == "link_prefix") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+
+		if (ev.kind == ExactValue_String) {
+			ac->link_prefix = ev.value_string;
+			if (!is_foreign_name_valid(ac->link_prefix)) {
+				error(elem, "Invalid link prefix: %.*s", LIT(ac->link_prefix));
+			}
+		} else {
+			error(elem, "Expected a string value for '%.*s'", LIT(name));
+		}
+		return true;
+	} else if (name == "deprecated") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+
+		if (ev.kind == ExactValue_String) {
+			String msg = ev.value_string;
+			if (msg.len == 0) {
+				error(elem, "Deprecation message cannot be an empty string");
+			} else {
+				ac->deprecated_message = msg;
+			}
+		} else {
+			error(elem, "Expected a string value for '%.*s'", LIT(name));
+		}
+		return true;
+	} else if (name == "require_results") {
+		if (value != nullptr) {
+			error(elem, "Expected no value for '%.*s'", LIT(name));
+		}
+		ac->require_results = true;
+		return true;
+	} else if (name == "disabled") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+
+		if (ev.kind == ExactValue_Bool) {
+			ac->has_disabled_proc = true;
+			ac->disabled_proc = ev.value_bool;
+		} else {
+			error(elem, "Expected a boolean value for '%.*s'", LIT(name));
+		}
+		return true;
+	}
+	return false;
+}
+
+DECL_ATTRIBUTE_PROC(var_decl_attribute) {
+	ExactValue ev = check_decl_attribute_value(c, value);
+
+	if (name == "static") {
+		if (value != nullptr) {
+			error(elem, "'static' does not have any parameters");
+		}
+		ac->is_static = true;
+		return true;
+	} else if (name == "thread_local") {
+		if (ac->init_expr_list_count > 0) {
+			error(elem, "A thread local variable declaration cannot have initialization values");
+		} else if (c->foreign_context.curr_library) {
+			error(elem, "A foreign block variable cannot be thread local");
+		} else if (ac->is_export) {
+			error(elem, "An exported variable cannot be thread local");
+		} else if (ev.kind == ExactValue_Invalid) {
+			ac->thread_local_model = str_lit("default");
+		} else if (ev.kind == ExactValue_String) {
+			String model = ev.value_string;
+			if (model == "default" ||
+			    model == "localdynamic" ||
+			    model == "initialexec" ||
+			    model == "localexec") {
+				ac->thread_local_model = model;
+			} else {
+				error(elem, "Invalid thread local model '%.*s'. Valid models:", LIT(model));
+				error_line("\tdefault\n");
+				error_line("\tlocaldynamic\n");
+				error_line("\tinitialexec\n");
+				error_line("\tlocalexec\n");
+			}
+		} else {
+			error(elem, "Expected either no value or a string for '%.*s'", LIT(name));
+		}
+		return true;
+	}
+
+	if (c->curr_proc_decl != nullptr) {
+		error(elem, "Only a variable at file scope can have a '%.*s'", LIT(name));
+		return true;
+	}
+
+	if (name == "export") {
+		ExactValue ev = check_decl_attribute_value(c, value);
+		if (ev.kind == ExactValue_Invalid) {
+			ac->is_export = true;
+		} else if (ev.kind == ExactValue_Bool) {
+			ac->is_export = ev.value_bool;
+		} else {
+			error(value, "Expected either a boolean or no parameter for 'export'");
+			return false;
+		}
+		if (ac->thread_local_model != "") {
+			error(elem, "An exported variable cannot be thread local");
+		}
 	} else if (name == "link_name") {
 		if (ev.kind == ExactValue_String) {
 			ac->link_name = ev.value_string;
@@ -1968,71 +2361,6 @@ DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 			}
 		} else {
 			error(elem, "Expected a string value for '%.*s'", LIT(name));
-		}
-		return true;
-	} else if (name == "deprecated") {
-		if (ev.kind == ExactValue_String) {
-			String msg = ev.value_string;
-			if (msg.len == 0) {
-				error(elem, "Deprecation message cannot be an empty string");
-			} else {
-				ac->deprecated_message = msg;
-			}
-		} else {
-			error(elem, "Expected a string value for '%.*s'", LIT(name));
-		}
-		return true;
-	}
-	return false;
-}
-
-DECL_ATTRIBUTE_PROC(var_decl_attribute) {
-	ExactValue ev = check_decl_attribute_value(c, value);
-
-	if (c->curr_proc_decl != nullptr) {
-		error(elem, "Only a variable at file scope can have a '%.*s'", LIT(name));
-		return true;
-	}
-
-	if (name == "link_name") {
-		if (ev.kind == ExactValue_String) {
-			ac->link_name = ev.value_string;
-			if (!is_foreign_name_valid(ac->link_name)) {
-				error(elem, "Invalid link name: %.*s", LIT(ac->link_name));
-			}
-		} else {
-			error(elem, "Expected a string value for '%.*s'", LIT(name));
-		}
-		return true;
-	} else if (name == "link_prefix") {
-		if (ev.kind == ExactValue_String) {
-			ac->link_prefix = ev.value_string;
-			if (!is_foreign_name_valid(ac->link_prefix)) {
-				error(elem, "Invalid link prefix: %.*s", LIT(ac->link_prefix));
-			}
-		} else {
-			error(elem, "Expected a string value for '%.*s'", LIT(name));
-		}
-		return true;
-	} else if (name == "thread_local") {
-		if (ac->init_expr_list_count > 0) {
-			error(elem, "A thread local variable declaration cannot have initialization values");
-		} else if (c->foreign_context.curr_library || c->foreign_context.in_export) {
-			error(elem, "A foreign block variable cannot be thread local");
-		} else if (ev.kind == ExactValue_Invalid) {
-			ac->thread_local_model = str_lit("default");
-		} else if (ev.kind == ExactValue_String) {
-			String model = ev.value_string;
-			if (model == "default" ||
-			    model == "localdynamic" ||
-			    model == "initialexec" ||
-			    model == "localexec") {
-				ac->thread_local_model = model;
-			} else {
-				error(elem, "Invalid thread local model '%.*s'", LIT(model));
-			}
-		} else {
-			error(elem, "Expected either no value or a string for '%.*s'", LIT(name));
 		}
 		return true;
 	}
@@ -2081,9 +2409,17 @@ void check_decl_attributes(CheckerContext *c, Array<Ast *> const &attributes, De
 			case_ast_node(i, Ident, elem);
 				name = i->token.string;
 			case_end;
+			case_ast_node(i, Implicit, elem);
+				name = i->string;
+			case_end;
 			case_ast_node(fv, FieldValue, elem);
-				GB_ASSERT(fv->field->kind == Ast_Ident);
-				name = fv->field->Ident.token.string;
+				if (fv->field->kind == Ast_Ident) {
+					name = fv->field->Ident.token.string;
+				} else if (fv->field->kind == Ast_Implicit) {
+					name = fv->field->Implicit.string;
+				} else {
+					GB_PANIC("Unknown Field Value name");
+				}
 				value = fv->value;
 			case_end;
 			default:
@@ -2099,7 +2435,9 @@ void check_decl_attributes(CheckerContext *c, Array<Ast *> const &attributes, De
 			}
 
 			if (!proc(c, elem, name, value, ac)) {
-				error(elem, "Unknown attribute element name '%.*s'", LIT(name));
+				if (!build_context.ignore_unknown_attributes) {
+					error(elem, "Unknown attribute element name '%.*s'", LIT(name));
+				}
 			}
 		}
 	}
@@ -2253,7 +2591,8 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 
 	ast_node(vd, ValueDecl, decl);
 
-	bool entity_is_private = false;
+	EntityVisiblityKind entity_visibility_kind = c->foreign_context.visibility_kind;
+
 	for_array(i, vd->attributes) {
 		Ast *attr = vd->attributes[i];
 		if (attr->kind != Ast_Attribute) continue;
@@ -2276,14 +2615,32 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 			}
 
 			if (name == "private") {
+				EntityVisiblityKind kind = EntityVisiblity_PrivateToPackage;
+				bool success = false;
 				if (value != nullptr) {
-					error(value, "'%.*s' does not expect a value", LIT(name));
+					if (value->kind == Ast_BasicLit && value->BasicLit.token.kind == Token_String) {
+						String v = value->BasicLit.token.string;
+						if (v == "file") {
+							kind = EntityVisiblity_PrivateToFile;
+							success = true;
+						} else if (v == "package") {
+							kind = EntityVisiblity_PrivateToPackage;
+							success = true;
+						}
+					}
+				} else {
+					success = true;
+				}
+				if (!success) {
+					error(value, "'%.*s' expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
 				}
 
-				if (entity_is_private) {
+
+
+				if (entity_visibility_kind >= kind) {
 					error(elem, "Previous declaration of '%.*s'", LIT(name));
 				} else {
-					entity_is_private = true;
+					entity_visibility_kind = kind;
 				}
 				array_unordered_remove(elems, j);
 				j -= 1;
@@ -2291,7 +2648,7 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 		}
 	}
 
-	if (entity_is_private && !(c->scope->flags&ScopeFlag_File)) {
+	if (entity_visibility_kind != EntityVisiblity_Public && !(c->scope->flags&ScopeFlag_File)) {
 		error(decl, "Attribute 'private' is not allowed on a non file scope entity");
 	}
 
@@ -2312,15 +2669,11 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 				error(name, "A declaration's name must be an identifier, got %.*s", LIT(ast_strings[name->kind]));
 				continue;
 			}
-			Entity *e = alloc_entity_variable(c->scope, name->Ident.token, nullptr, false);
+			Entity *e = alloc_entity_variable(c->scope, name->Ident.token, nullptr);
 			e->identifier = name;
 
-			if (entity_is_private) {
+			if (entity_visibility_kind != EntityVisiblity_Public) {
 				e->flags |= EntityFlag_NotExported;
-			}
-
-			if (vd->is_static) {
-				e->flags |= EntityFlag_Static;
 			}
 
 			if (vd->is_using) {
@@ -2335,18 +2688,17 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 				e->Variable.foreign_library_ident = fl;
 
 				e->Variable.link_prefix = c->foreign_context.link_prefix;
-
-			} else if (c->foreign_context.in_export) {
-				e->Variable.is_export = true;
 			}
 
 			Ast *init_expr = value;
 			DeclInfo *d = make_decl_info(heap_allocator(), c->scope, c->decl);
+			d->entity    = e;
 			d->type_expr = vd->type;
 			d->init_expr = init_expr;
 			d->attributes = vd->attributes;
 
-			add_entity_and_decl_info(c, name, e, d);
+			bool is_exported = entity_visibility_kind != EntityVisiblity_PrivateToFile;
+			add_entity_and_decl_info(c, name, e, d, is_exported);
 		}
 
 		check_arity_match(c, vd, true);
@@ -2371,14 +2723,14 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 			Entity *e = nullptr;
 
 			d->attributes = vd->attributes;
+			d->type_expr = vd->type;
+			d->init_expr = init;
 
 			if (is_ast_type(init)) {
 				e = alloc_entity_type_name(d->scope, token, nullptr);
-				if (vd->type != nullptr) {
-					error(name, "A type declaration cannot have an type parameter");
-				}
-				d->type_expr = init;
-				d->init_expr = init;
+				// if (vd->type != nullptr) {
+				// 	error(name, "A type declaration cannot have an type parameter");
+				// }
 			} else if (init->kind == Ast_ProcLit) {
 				if (c->scope->flags&ScopeFlag_Type) {
 					error(name, "Procedure declarations are not allowed within a struct");
@@ -2403,36 +2755,22 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 
 					GB_ASSERT(cc != ProcCC_Invalid);
 					pl->type->ProcType.calling_convention = cc;
-
-				} else if (c->foreign_context.in_export) {
-					e->Procedure.is_export = true;
 				}
 				d->proc_lit = init;
-				d->type_expr = pl->type;
+				d->init_expr = init;
 			} else if (init->kind == Ast_ProcGroup) {
 				ast_node(pg, ProcGroup, init);
 				e = alloc_entity_proc_group(d->scope, token, nullptr);
 				if (fl != nullptr) {
 					error(name, "Procedure groups are not allowed within a foreign block");
 				}
-				d->init_expr = init;
 			} else {
 				e = alloc_entity_constant(d->scope, token, nullptr, empty_exact_value);
-				d->type_expr = vd->type;
-				d->init_expr = init;
 			}
 			e->identifier = name;
 
-			if (entity_is_private) {
+			if (entity_visibility_kind != EntityVisiblity_Public) {
 				e->flags |= EntityFlag_NotExported;
-			}
-
-			if (vd->is_static) {
-				if (e->kind == Entity_Constant) {
-					e->flags |= EntityFlag_Static;
-				} else {
-					error(name, "'static' is not allowed on this constant value declaration");
-				}
 			}
 
 			if (vd->is_using) {
@@ -2444,18 +2782,22 @@ void check_collect_value_decl(CheckerContext *c, Ast *decl) {
 			}
 
 			if (e->kind != Entity_Procedure) {
-				if (fl != nullptr || c->foreign_context.in_export) {
+				if (fl != nullptr) {
+					begin_error_block();
+					defer (end_error_block());
+
 					AstKind kind = init->kind;
 					error(name, "Only procedures and variables are allowed to be in a foreign block, got %.*s", LIT(ast_strings[kind]));
 					if (kind == Ast_ProcType) {
-						gb_printf_err("\tDid you forget to append '---' to the procedure?\n");
+						error_line("\tDid you forget to append '---' to the procedure?\n");
 					}
 				}
 			}
 
 			check_builtin_attributes(c, e, &d->attributes);
 
-			add_entity_and_decl_info(c, name, e, d);
+			bool is_exported = entity_visibility_kind != EntityVisiblity_PrivateToFile;
+			add_entity_and_decl_info(c, name, e, d, is_exported);
 		}
 
 		check_arity_match(c, vd, true);
@@ -2472,8 +2814,6 @@ void check_add_foreign_block_decl(CheckerContext *ctx, Ast *decl) {
 	CheckerContext c = *ctx;
 	if (foreign_library->kind == Ast_Ident) {
 		c.foreign_context.curr_library = foreign_library;
-	} else if (foreign_library->kind == Ast_Implicit && foreign_library->Implicit.kind == Token_export) {
-		c.foreign_context.in_export = true;
 	} else {
 		error(foreign_library, "Foreign block name must be an identifier or 'export'");
 		c.foreign_context.curr_library = nullptr;
@@ -2563,46 +2903,56 @@ void check_collect_entities(CheckerContext *c, Array<Ast *> const &nodes) {
 }
 
 
+void check_single_global_entity(Checker *c, Entity *e, DeclInfo *d) {
+	GB_ASSERT(e != nullptr);
+	GB_ASSERT(d != nullptr);
+
+	if (d->scope != e->scope) {
+		return;
+	}
+	if (e->state == EntityState_Resolved)  {
+		return;
+	}
+
+	CheckerContext ctx = c->init_ctx;
+
+	GB_ASSERT(d->scope->flags&ScopeFlag_File);
+	AstFile *file = d->scope->file;
+	add_curr_ast_file(&ctx, file);
+	AstPackage *pkg = file->pkg;
+
+	GB_ASSERT(ctx.pkg != nullptr);
+	GB_ASSERT(e->pkg != nullptr);
+
+	if (!e->pkg->used) {
+		return;
+	}
+
+
+	if (pkg->kind == Package_Init) {
+		if (e->kind != Entity_Procedure && e->token.string == "main") {
+			error(e->token, "'main' is reserved as the entry point procedure in the initial scope");
+			return;
+		}
+	} else if (pkg->kind == Package_Runtime) {
+		if (e->token.string == "main") {
+			error(e->token, "'main' is reserved as the entry point procedure in the initial scope");
+			return;
+		}
+	}
+
+	ctx.decl = d;
+	ctx.scope = d->scope;
+	check_entity_decl(&ctx, e, d, nullptr);
+}
+
 void check_all_global_entities(Checker *c) {
 	Scope *prev_file = nullptr;
 
 	for_array(i, c->info.entities) {
 		Entity *e = c->info.entities[i];
 		DeclInfo *d = e->decl_info;
-
-		if (d->scope != e->scope) {
-			continue;
-		}
-
-		CheckerContext ctx = c->init_ctx;
-
-		GB_ASSERT(d->scope->flags&ScopeFlag_File);
-		AstFile *file = d->scope->file;
-		add_curr_ast_file(&ctx, file);
-		AstPackage *pkg = file->pkg;
-
-		GB_ASSERT(ctx.pkg != nullptr);
-		GB_ASSERT(e->pkg != nullptr);
-
-		if (!e->pkg->used) {
-			continue;
-		}
-
-		if (pkg->kind == Package_Init) {
-			if (e->kind != Entity_Procedure && e->token.string == "main") {
-				error(e->token, "'main' is reserved as the entry point procedure in the initial scope");
-				continue;
-			}
-		} else if (pkg->kind == Package_Runtime) {
-			if (e->token.string == "main") {
-				error(e->token, "'main' is reserved as the entry point procedure in the initial scope");
-				continue;
-			}
-		}
-
-		ctx.decl = d;
-		ctx.scope = d->scope;
-		check_entity_decl(&ctx, e, d, nullptr);
+		check_single_global_entity(c, e, d);
 	}
 }
 
@@ -2631,7 +2981,7 @@ bool is_string_an_identifier(String s) {
 	return offset == s.len;
 }
 
-String path_to_entity_name(String name, String fullpath) {
+String path_to_entity_name(String name, String fullpath, bool strip_extension=true) {
 	if (name.len != 0) {
 		return name;
 	}
@@ -2650,16 +3000,18 @@ String path_to_entity_name(String name, String fullpath) {
 
 	filename = substring(filename, slash, filename.len);
 
-	dot = filename.len;
-	while (dot --> 0) {
-		u8 c = filename[dot];
-		if (c == '.') {
-			break;
+	if (strip_extension) {
+		dot = filename.len;
+		while (dot --> 0) {
+			u8 c = filename[dot];
+			if (c == '.') {
+				break;
+			}
 		}
-	}
 
-	if (dot > 0) {
-		filename = substring(filename, 0, dot);
+		if (dot > 0) {
+			filename = substring(filename, 0, dot);
+		}
 	}
 
 	if (is_string_an_identifier(filename)) {
@@ -2884,12 +3236,14 @@ void check_add_import_decl(CheckerContext *ctx, Ast *decl) {
 		ptr_set_add(&parent_scope->imported, scope);
 	}
 
+	String import_name = path_to_entity_name(id->import_name.string, id->fullpath, false);
 
-	String import_name = id->import_name.string;
-	if (import_name.len == 0) {
-		import_name = scope->pkg->name;
-	}
-	if (is_blank_ident(import_name)) {
+	// NOTE(bill, 2019-05-19): If the directory path is not a valid entity name, force the user to assign a custom one
+	// if (import_name.len == 0 || import_name == "_") {
+	// 	import_name = scope->pkg->name;
+	// }
+
+	if (import_name.len == 0 || is_blank_ident(import_name)) {
 		if (id->is_using) {
 			// TODO(bill): Should this be a warning?
 		} else {
@@ -2916,12 +3270,21 @@ void check_add_import_decl(CheckerContext *ctx, Ast *decl) {
 
 		// NOTE(bill): Add imported entities to this file's scope
 		for_array(elem_index, scope->elements.entries) {
+			String name = scope->elements.entries[elem_index].key.string;
 			Entity *e = scope->elements.entries[elem_index].value;
 			if (e->scope == parent_scope) continue;
 
-			if (is_entity_exported(e)) {
-				Entity *prev = scope_lookup(parent_scope, e->token.string);
-				add_entity(ctx->checker, parent_scope, e->identifier, e);
+			if (is_entity_exported(e, true)) {
+				Entity *found = scope_lookup_current(parent_scope, name);
+				if (found != nullptr) {
+					// NOTE(bill):
+					// Date: 2019-03-17
+					// The order has to be the other way around as `using` adds the entity into the that
+					// file scope otherwise the error would be the wrong way around
+					redeclaration_error(name, found, e);
+				} else {
+					add_entity_with_name(ctx->checker, parent_scope, e->identifier, e, name);
+				}
 			}
 		}
 	}
@@ -2929,6 +3292,16 @@ void check_add_import_decl(CheckerContext *ctx, Ast *decl) {
 	scope->flags |= ScopeFlag_HasBeenImported;
 }
 
+DECL_ATTRIBUTE_PROC(foreign_import_decl_attribute) {
+	if (name == "force") {
+		if (value != nullptr) {
+			error(elem, "Expected no parameter for '%.*s'", LIT(name));
+		}
+		ac->force_foreign_import = true;
+		return true;
+	}
+	return false;
+}
 
 void check_add_foreign_import_decl(CheckerContext *ctx, Ast *decl) {
 	if (decl->been_handled) return;
@@ -2973,6 +3346,14 @@ void check_add_foreign_import_decl(CheckerContext *ctx, Ast *decl) {
 	Entity *e = alloc_entity_library_name(parent_scope, fl->library_name, t_invalid,
 	                                      fl->fullpaths, library_name);
 	add_entity(ctx->checker, parent_scope, nullptr, e);
+
+
+	AttributeContext ac = {};
+	check_decl_attributes(ctx, fl->attributes, foreign_import_decl_attribute, &ac);
+	if (ac.force_foreign_import) {
+		array_add(&ctx->info->required_foreign_imports_through_force, e);
+		add_entity_use(ctx, nullptr, e);
+	}
 }
 
 bool collect_checked_packages_from_decl_list(Checker *c, Array<Ast *> const &decls) {
@@ -3125,8 +3506,9 @@ bool collect_file_decls(CheckerContext *ctx, Array<Ast *> const &decls) {
 			if (es->expr->kind == Ast_CallExpr) {
 				ast_node(ce, CallExpr, es->expr);
 				if (ce->proc->kind == Ast_BasicDirective) {
-					Operand o = {};
-					check_expr(ctx, &o, es->expr);
+					if (ctx->collect_delayed_decls) {
+						array_add(&ctx->scope->delayed_directives, es->expr);
+					}
 				}
 			}
 		case_end;
@@ -3283,12 +3665,18 @@ void check_import_entities(Checker *c) {
 		for_array(i, pkg->files) {
 			AstFile *f = pkg->files[i];
 			CheckerContext ctx = c->init_ctx;
-
 			add_curr_ast_file(&ctx, f);
+
 			for_array(j, f->scope->delayed_imports) {
 				Ast *decl = f->scope->delayed_imports[j];
 				check_add_import_decl(&ctx, decl);
 			}
+		}
+		for_array(i, pkg->files) {
+			AstFile *f = pkg->files[i];
+			CheckerContext ctx = c->init_ctx;
+			add_curr_ast_file(&ctx, f);
+
 			for_array(j, f->scope->delayed_directives) {
 				Ast *expr = f->scope->delayed_directives[j];
 				Operand o = {};
@@ -3340,22 +3728,11 @@ Array<Entity *> find_entity_path(Entity *start, Entity *end, Map<Entity *> *visi
 
 
 void calculate_global_init_order(Checker *c) {
-#if 0
-	Timings timings = {};
-	timings_init(&timings, str_lit("calculate_global_init_order"), 16);
-	defer ({
-		timings_print_all(&timings);
-		timings_destroy(&timings);
-	});
-#define TIME_SECTION(str) timings_start_section(&timings, str_lit(str))
-#else
-#define TIME_SECTION(str)
-#endif
-
+#define TIME_SECTION(str) do { if (build_context.show_more_timings) timings_start_section(&global_timings, str_lit(str)); } while (0)
 
 	CheckerInfo *info = &c->info;
 
-	TIME_SECTION("generate entity dependency graph");
+	TIME_SECTION("calculate_global_init_order: generate entity dependency graph");
 	Array<EntityGraphNode *> dep_graph = generate_entity_dependency_graph(info);
 	defer ({
 		for_array(i, dep_graph) {
@@ -3364,7 +3741,7 @@ void calculate_global_init_order(Checker *c) {
 		array_free(&dep_graph);
 	});
 
-	TIME_SECTION("priority queue create");
+	TIME_SECTION("calculate_global_init_order: priority queue create");
 	// NOTE(bill): Priority queue
 	auto pq = priority_queue_create(dep_graph, entity_graph_node_cmp, entity_graph_node_swap);
 
@@ -3372,7 +3749,7 @@ void calculate_global_init_order(Checker *c) {
 	ptr_set_init(&emitted, heap_allocator());
 	defer (ptr_set_destroy(&emitted));
 
-	TIME_SECTION("queue sort");
+	TIME_SECTION("calculate_global_init_order: queue sort");
 	while (pq.queue.count > 0) {
 		EntityGraphNode *n = priority_queue_pop(&pq);
 		Entity *e = n->entity;
@@ -3394,21 +3771,26 @@ void calculate_global_init_order(Checker *c) {
 
 		for_array(i, n->pred.entries) {
 			EntityGraphNode *p = n->pred.entries[i].ptr;
-			p->dep_count -= gb_max(p->dep_count-1, 0);
+			p->dep_count -= 1;
+			p->dep_count = gb_max(p->dep_count, 0);
 			priority_queue_fix(&pq, p->index);
 		}
 
-		if (e == nullptr || e->kind != Entity_Variable) {
+		DeclInfo *d = decl_info_of_entity(e);
+		if (e->kind != Entity_Variable) {
 			continue;
 		}
-		DeclInfo *d = decl_info_of_entity(e);
-
+		// IMPORTANT NOTE(bill, 2019-08-29): Just add it regardless of the ordering
+		// because it does not need any initialization other than zero
+		// if (!decl_info_has_init(d)) {
+		// 	continue;
+		// }
 		if (ptr_set_exists(&emitted, d)) {
 			continue;
 		}
 		ptr_set_add(&emitted, d);
 
-		d->entity = e;
+
 		array_add(&info->variable_init_order, d);
 	}
 
@@ -3447,15 +3829,23 @@ void check_proc_info(Checker *c, ProcInfo pi) {
 		return;
 	}
 
+	if (pt->is_polymorphic && pt->is_poly_specialized) {
+		Entity *e = pi.decl->entity;
+		if ((e->flags & EntityFlag_Used) == 0) {
+			// NOTE(bill, 2019-08-31): It was never used, don't check
+			return;
+		}
+	}
+
 	bool bounds_check    = (pi.tags & ProcTag_bounds_check)    != 0;
 	bool no_bounds_check = (pi.tags & ProcTag_no_bounds_check) != 0;
 
 	if (bounds_check) {
-		ctx.stmt_state_flags |= StmtStateFlag_bounds_check;
-		ctx.stmt_state_flags &= ~StmtStateFlag_no_bounds_check;
+		ctx.state_flags |= StateFlag_bounds_check;
+		ctx.state_flags &= ~StateFlag_no_bounds_check;
 	} else if (no_bounds_check) {
-		ctx.stmt_state_flags |= StmtStateFlag_no_bounds_check;
-		ctx.stmt_state_flags &= ~StmtStateFlag_bounds_check;
+		ctx.state_flags |= StateFlag_no_bounds_check;
+		ctx.state_flags &= ~StateFlag_bounds_check;
 	}
 
 	check_proc_body(&ctx, pi.token, pi.decl, pi.type, pi.body);
@@ -3471,17 +3861,7 @@ GB_THREAD_PROC(check_proc_info_worker_proc) {
 
 
 void check_parsed_files(Checker *c) {
-#if 0
-	Timings timings = {};
-	timings_init(&timings, str_lit("check_parsed_files"), 16);
-	defer ({
-		timings_print_all(&timings);
-		timings_destroy(&timings);
-	});
-#define TIME_SECTION(str) timings_start_section(&timings, str_lit(str))
-#else
-#define TIME_SECTION(str)
-#endif
+#define TIME_SECTION(str) do { if (build_context.show_more_timings) timings_start_section(&global_timings, str_lit(str)); } while (0)
 
 	TIME_SECTION("map full filepaths to scope");
 	add_type_info_type(&c->init_ctx, t_invalid);
@@ -3543,6 +3923,7 @@ void check_parsed_files(Checker *c) {
 		check_proc_info(c, pi);
 	}
 
+	TIME_SECTION("check scope usage");
 	for_array(i, c->info.files.entries) {
 		AstFile *f = c->info.files.entries[i].value;
 		check_scope_usage(c, f->scope);
@@ -3615,47 +3996,100 @@ void check_parsed_files(Checker *c) {
 		Entity *src = c->procs_with_deferred_to_check[i];
 		GB_ASSERT(src->kind == Entity_Procedure);
 
-		Entity *dst = src->Procedure.deferred_procedure;
+		DeferredProcedureKind dst_kind = src->Procedure.deferred_procedure.kind;
+		Entity *dst = src->Procedure.deferred_procedure.entity;
 		GB_ASSERT(dst != nullptr);
 		GB_ASSERT(dst->kind == Entity_Procedure);
 
 		if (is_type_polymorphic(src->type) || is_type_polymorphic(dst->type)) {
-			error(src->token, "'deferred' cannot be used with a polymorphic procedure");
+			switch (dst_kind) {
+			case DeferredProcedure_none:
+				error(src->token, "'deferred_none' cannot be used with a polymorphic procedure");
+				break;
+			case DeferredProcedure_in:
+				error(src->token, "'deferred_in' cannot be used with a polymorphic procedure");
+				break;
+			case DeferredProcedure_out:
+				error(src->token, "'deferred_out' cannot be used with a polymorphic procedure");
+				break;
+			}
 			continue;
 		}
 
 		GB_ASSERT(is_type_proc(src->type));
 		GB_ASSERT(is_type_proc(dst->type));
+		Type *src_params = base_type(src->type)->Proc.params;
 		Type *src_results = base_type(src->type)->Proc.results;
 		Type *dst_params = base_type(dst->type)->Proc.params;
-		if (src_results == nullptr && dst_params == nullptr) {
-			// Okay
-			continue;
-		}
-		if ((src_results == nullptr && dst_params != nullptr) ||
-		    (src_results != nullptr && dst_params == nullptr)) {
-			error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s'", LIT(src->token.string), LIT(dst->token.string));
-			continue;
-		}
 
-		GB_ASSERT(src_results->kind == Type_Tuple);
-		GB_ASSERT(dst_params->kind == Type_Tuple);
+		if (dst_kind == DeferredProcedure_none) {
+			if (dst_params == nullptr) {
+				// Okay
+				continue;
+			}
 
-		auto const &sv = src_results->Tuple.variables;
-		auto const &dv = dst_params->Tuple.variables;
+			error(src->token, "Deferred procedure '%.*s' must have no input parameters", LIT(dst->token.string));
+		} else if (dst_kind == DeferredProcedure_in) {
+			if (src_params == nullptr && dst_params == nullptr) {
+				// Okay
+				continue;
+			}
+			if ((src_params == nullptr && dst_params != nullptr) ||
+			    (src_params != nullptr && dst_params == nullptr)) {
+				error(src->token, "Deferred procedure '%.*s' parameters do not match the inputs of initial procedure '%.*s'", LIT(src->token.string), LIT(dst->token.string));
+				continue;
+			}
 
-		if (are_types_identical(src_results, dst_params)) {
-			// Okay!
-		} else {
-			gbString s = type_to_string(src_results);
-			gbString d = type_to_string(dst_params);
-			error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)",
-			      LIT(src->token.string), LIT(dst->token.string),
-			      s, d
-			);
-			gb_string_free(d);
-			gb_string_free(s);
-			continue;
+			GB_ASSERT(src_params->kind == Type_Tuple);
+			GB_ASSERT(dst_params->kind == Type_Tuple);
+
+			auto const &sv = src_params->Tuple.variables;
+			auto const &dv = dst_params->Tuple.variables;
+
+			if (are_types_identical(src_params, dst_params)) {
+				// Okay!
+			} else {
+				gbString s = type_to_string(src_params);
+				gbString d = type_to_string(dst_params);
+				error(src->token, "Deferred procedure '%.*s' parameters do not match the inputs of initial procedure '%.*s':\n\t(%s) =/= (%s)",
+				      LIT(src->token.string), LIT(dst->token.string),
+				      s, d
+				);
+				gb_string_free(d);
+				gb_string_free(s);
+				continue;
+			}
+
+		} else if (dst_kind == DeferredProcedure_out) {
+			if (src_results == nullptr && dst_params == nullptr) {
+				// Okay
+				continue;
+			}
+			if ((src_results == nullptr && dst_params != nullptr) ||
+			    (src_results != nullptr && dst_params == nullptr)) {
+				error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s'", LIT(src->token.string), LIT(dst->token.string));
+				continue;
+			}
+
+			GB_ASSERT(src_results->kind == Type_Tuple);
+			GB_ASSERT(dst_params->kind == Type_Tuple);
+
+			auto const &sv = src_results->Tuple.variables;
+			auto const &dv = dst_params->Tuple.variables;
+
+			if (are_types_identical(src_results, dst_params)) {
+				// Okay!
+			} else {
+				gbString s = type_to_string(src_results);
+				gbString d = type_to_string(dst_params);
+				error(src->token, "Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)",
+				      LIT(src->token.string), LIT(dst->token.string),
+				      s, d
+				);
+				gb_string_free(d);
+				gb_string_free(s);
+				continue;
+			}
 		}
 	}
 

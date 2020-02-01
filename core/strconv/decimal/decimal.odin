@@ -1,6 +1,6 @@
 // Multiple precision decimal numbers
 // NOTE: This is only for floating point printing and nothing else
-package decimal
+package strconv_decimal
 
 Decimal :: struct {
 	digits:        [384]byte, // big-endian digits
@@ -20,29 +20,29 @@ decimal_to_string :: proc(buf: []byte, a: ^Decimal) -> string {
 
 	// TODO(bill): make this work with a buffer that's not big enough
 	assert(len(buf) >= n);
-	buf = buf[0:n];
+	b := buf[0:n];
 
 	if a.count == 0 {
-		buf[0] = '0';
-		return string(buf[0:1]);
+		b[0] = '0';
+		return string(b[0:1]);
 	}
 
 	w := 0;
 	if a.decimal_point <= 0 {
-		buf[w] = '0'; w += 1;
-		buf[w] = '.'; w += 1;
-		w += digit_zero(buf[w : w-a.decimal_point]);
-		w += copy(buf[w:], a.digits[0:a.count]);
+		b[w] = '0'; w += 1;
+		b[w] = '.'; w += 1;
+		w += digit_zero(b[w : w-a.decimal_point]);
+		w += copy(b[w:], a.digits[0:a.count]);
 	} else if a.decimal_point < a.count {
-		w += copy(buf[w:], a.digits[0:a.decimal_point]);
-		buf[w] = '.'; w += 1;
-		w += copy(buf[w:], a.digits[a.decimal_point : a.count]);
+		w += copy(b[w:], a.digits[0:a.decimal_point]);
+		b[w] = '.'; w += 1;
+		w += copy(b[w:], a.digits[a.decimal_point : a.count]);
 	} else {
-		w += copy(buf[w:], a.digits[0:a.count]);
-		w += digit_zero(buf[w : w+a.decimal_point-a.count]);
+		w += copy(b[w:], a.digits[0:a.count]);
+		w += digit_zero(b[w : w+a.decimal_point-a.count]);
 	}
 
-	return string(buf[0:w]);
+	return string(b[0:w]);
 }
 
 // trim trailing zeros
@@ -56,10 +56,10 @@ trim :: proc(a: ^Decimal) {
 }
 
 
-assign :: proc(a: ^Decimal, i: u64) {
+assign :: proc(a: ^Decimal, idx: u64) {
 	buf: [64]byte;
 	n := 0;
-	for i > 0 {
+	for i := idx; i > 0;  {
 		j := i/10;
 		i -= 10*j;
 		buf[n] = byte('0'+i);
@@ -130,10 +130,15 @@ shift_right :: proc(a: ^Decimal, k: uint) {
 }
 
 shift_left :: proc(a: ^Decimal, k: uint) {
-	delta := int(k/4);
+	// NOTE(bill): used to determine buffer size required for the decimal from the binary shift
+	// 'k' means `1<<k` == `2^k` which equates to roundup(k*log10(2)) digits required
+	log10_2 :: 0.301029995663981195213738894724493026768189881462108541310;
+	capacity := int(f64(k)*log10_2 + 1);
 
-	r := a.count;       // read index
-	w := a.count+delta; // write index
+	r := a.count;          // read index
+	w := a.count+capacity; // write index
+
+	d := len(a.digits);
 
 	n: uint;
 	for r -= 1; r >= 0; r -= 1 {
@@ -141,7 +146,7 @@ shift_left :: proc(a: ^Decimal, k: uint) {
 		quo := n/10;
 		rem := n - 10*quo;
 		w -= 1;
-		if w < len(a.digits) {
+		if w < d {
 			a.digits[w] = byte('0' + rem);
 		} else if rem != 0 {
 			a.trunc = true;
@@ -153,7 +158,7 @@ shift_left :: proc(a: ^Decimal, k: uint) {
 		quo := n/10;
 		rem := n - 10*quo;
 		w -= 1;
-		if 0 <= w && w < len(a.digits) {
+		if w < d {
 			a.digits[w] = byte('0' + rem);
 		} else if rem != 0 {
 			a.trunc = true;
@@ -161,17 +166,20 @@ shift_left :: proc(a: ^Decimal, k: uint) {
 		n = quo;
 	}
 
-	a.count += delta;
-	a.count = min(a.count, len(a.digits));
-	a.decimal_point += delta;
+	// NOTE(bill): Remove unused buffer size
+	assert(w >= 0);
+	capacity -= w;
+
+	a.count = min(a.count+capacity, d);
+	a.decimal_point += capacity;
 	trim(a);
 }
 
-shift :: proc(a: ^Decimal, k: int) {
+shift :: proc(a: ^Decimal, i: int) {
 	uint_size :: 8*size_of(uint);
 	max_shift :: uint_size-4;
 
-	switch {
+	switch k := i; {
 	case a.count == 0:
 		// no need to update
 	case k > 0:
@@ -253,3 +261,4 @@ rounded_integer :: proc(a: ^Decimal) -> u64 {
 	}
 	return n;
 }
+

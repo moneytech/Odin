@@ -10,8 +10,12 @@
     <a href="https://github.com/odin-lang/odin/releases/latest">
         <img src="https://img.shields.io/badge/platforms-Windows%20|%20Linux%20|%20macOS-green.svg">
     </a>
-    <a href="https://github.com/odin-lang/odin/blob/master/LICENSE">
-        <img src="https://img.shields.io/github/license/odin-lang/odin.svg">
+    <br>
+    <a href="https://discord.gg/hnwN2Rj">
+        <img src="https://img.shields.io/discord/568138951836172421?logo=discord">
+    </a>
+    <a href="https://github.com/odin-lang/odin/actions">
+        <img src="https://github.com/odin-lang/odin/workflows/CI/badge.svg?branch=master&event=push">
     </a>
 </p>
 
@@ -23,13 +27,9 @@ The Odin programming language is fast, concise, readable, pragmatic and open sou
 * built for modern systems
 * joy of programming
 
-Website: [https://odin.handmade.network/](https://odin.handmade.network/)
+Website: [https://odin-lang.org/](https://odin-lang.org/)
 
-## Documentation
-* [Tutorial](https://odin.handmade.network/wiki/3329-odin_tutorial)
-* [Frequently Asked Questions](https://github.com/odin-lang/Odin/wiki/Frequently-Asked-Questions-(FAQ))
-
-```go
+```odin
 package main
 
 import "core:fmt"
@@ -54,6 +54,43 @@ main :: proc() {
 }
 
 ```
+
+
+## Documentation
+
+#### [Getting Started](https://odin-lang.org/docs/install)
+
+Instructions for downloading and install the Odin compiler and libraries.
+
+### Learning Odin
+
+#### [Overview of Odin](https://odin-lang.org/docs/overview)
+
+An overview of the Odin programming language.
+
+#### [Frequently Asked Questions (FAQ)](https://odin-lang.org/docs/faq)
+
+Answers to common questions about Odin.
+
+#### [The Odin Wiki](https://github.com/odin-lang/Odin/wiki)
+
+A wiki maintained by the Odin community.
+
+#### [Odin Discord](https://discord.gg/sVBPHEv)
+
+Get live support and talk with other odiners on the Odin Discord.
+
+### References
+
+#### [Language Specification](https://odin-lang.org/ref/spec)
+
+The official Odin Language specification.
+
+### Articles
+
+#### [The Odin Blog](https://odin-lang.org/blog)
+
+The official blog of the Odin programming language, featuring announcements, news, and in-depth articles by the Odin team and guests.
 
 ## Setup
 

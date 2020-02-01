@@ -78,7 +78,7 @@ Token :: struct {
 }
 
 Tokenizer :: struct {
-	src: []byte,
+	src:         []byte,
 
 	file:        string, // May not be used
 
@@ -137,7 +137,7 @@ kind_to_string := [len(Kind)]string{
 };
 
 precedence :: proc(op: Kind) -> int {
-	switch op {
+	#partial switch op {
 	case Question:
 		return 1;
 	case Or:
@@ -183,9 +183,9 @@ tokenizer_init :: proc(t: ^Tokenizer, src: []byte, file := "") {
 }
 
 token_error :: proc(t: ^Tokenizer, msg: string, args: ..any) {
-	fmt.printf_err("%s(%d:%d) Error: ", t.file, t.line_count, t.read_offset-t.line_offset+1);
-	fmt.printf_err(msg, ..args);
-	fmt.println_err();
+	fmt.eprintf("%s(%d:%d) Error: ", t.file, t.line_count, t.read_offset-t.line_offset+1);
+	fmt.eprintf(msg, ..args);
+	fmt.eprintln();
 	t.error_count += 1;
 }
 
@@ -281,34 +281,37 @@ digit_value :: proc(r: rune) -> int {
 }
 
 scan_number :: proc(t: ^Tokenizer, seen_decimal_point: bool) -> (Kind, string) {
-	scan_manitissa :: proc(t: ^Tokenizer, base: int) {
+	scan_mantissa :: proc(t: ^Tokenizer, base: int) {
 		for digit_value(t.curr_rune) < base || t.curr_rune == '_' {
 			advance_to_next_rune(t);
 		}
 	}
-	scan_exponent :: proc(t: ^Tokenizer, tok: Kind, offset: int) -> (Kind, string) {
+	scan_exponent :: proc(t: ^Tokenizer, tok: Kind, offset: int) -> (kind: Kind, text: string) {
+		kind = tok;
 		if t.curr_rune == 'e' || t.curr_rune == 'E' {
-			tok = Float;
+			kind = Float;
 			advance_to_next_rune(t);
 			if t.curr_rune == '-' || t.curr_rune == '+' {
 				advance_to_next_rune(t);
 			}
 			if digit_value(t.curr_rune) < 10 {
-				scan_manitissa(t, 10);
+				scan_mantissa(t, 10);
 			} else {
 				token_error(t, "Illegal floating point exponent");
 			}
 		}
-		return tok, string(t.src[offset : t.offset]);
+		text = string(t.src[offset : t.offset]);
+		return;
 	}
-	scan_fraction :: proc(t: ^Tokenizer, tok: Kind, offset: int) -> (Kind, string) {
+	scan_fraction :: proc(t: ^Tokenizer, tok: Kind, offset: int) -> (kind: Kind, text: string)  {
+		kind = tok;
 		if t.curr_rune == '.' {
-			tok = Float;
+			kind = Float;
 			advance_to_next_rune(t);
-			scan_manitissa(t, 10);
+			scan_mantissa(t, 10);
 		}
 
-		return scan_exponent(t, tok, offset);
+		return scan_exponent(t, kind, offset);
 	}
 
 	offset := t.offset;
@@ -317,34 +320,34 @@ scan_number :: proc(t: ^Tokenizer, seen_decimal_point: bool) -> (Kind, string) {
 	if seen_decimal_point {
 		offset -= 1;
 		tok = Float;
-		scan_manitissa(t, 10);
+		scan_mantissa(t, 10);
 		return scan_exponent(t, tok, offset);
 	}
 
 	if t.curr_rune == '0' {
-		offset := t.offset;
+		offset = t.offset;
 		advance_to_next_rune(t);
 		switch t.curr_rune {
 		case 'b', 'B':
 			advance_to_next_rune(t);
-			scan_manitissa(t, 2);
+			scan_mantissa(t, 2);
 			if t.offset - offset <= 2 {
 				token_error(t, "Illegal binary number");
 			}
 		case 'o', 'O':
 			advance_to_next_rune(t);
-			scan_manitissa(t, 8);
+			scan_mantissa(t, 8);
 			if t.offset - offset <= 2 {
 				token_error(t, "Illegal octal number");
 			}
 		case 'x', 'X':
 			advance_to_next_rune(t);
-			scan_manitissa(t, 16);
+			scan_mantissa(t, 16);
 			if t.offset - offset <= 2 {
 				token_error(t, "Illegal hexadecimal number");
 			}
 		case:
-			scan_manitissa(t, 10);
+			scan_mantissa(t, 10);
 			switch t.curr_rune {
 			case '.', 'e', 'E':
 				return scan_fraction(t, tok, offset);
@@ -354,7 +357,7 @@ scan_number :: proc(t: ^Tokenizer, seen_decimal_point: bool) -> (Kind, string) {
 		return tok, string(t.src[offset:t.offset]);
 	}
 
-	scan_manitissa(t, 10);
+	scan_mantissa(t, 10);
 
 	return scan_fraction(t, tok, offset);
 }
@@ -403,17 +406,17 @@ scan :: proc(t: ^Tokenizer) -> Token {
 			quote := r;
 			tok = String;
 			for {
-				r := t.curr_rune;
-				if r == '\n' || r < 0 {
+				this_r := t.curr_rune;
+				if this_r == '\n' || r < 0 {
 					token_error(t, "String literal not terminated");
 					break;
 				}
 				advance_to_next_rune(t);
-				if r == quote {
+				if this_r == quote {
 					break;
 				}
 				// TODO(bill); Handle properly
-				if r == '\\' && t.curr_rune == quote {
+				if this_r == '\\' && t.curr_rune == quote {
 					advance_to_next_rune(t);
 				}
 			}

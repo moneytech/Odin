@@ -6,6 +6,7 @@ import "core:strconv"
 
 Parser :: struct {
 	tok:        Tokenizer,
+	prev_token: Token,
 	curr_token: Token,
 	spec:       Specification,
 	allocator:  mem.Allocator,
@@ -31,11 +32,17 @@ parse :: proc(data: []byte, spec := Specification.JSON, allocator := context.all
 	return parse_object(&p);
 }
 
+token_end_pos :: proc(tok: Token) -> Pos {
+	end := tok.pos;
+	end.offset += len(tok.text);
+	return end;
+}
+
 advance_token :: proc(p: ^Parser) -> (Token, Error) {
 	err: Error;
-	prev := p.curr_token;
+	p.prev_token = p.curr_token;
 	p.curr_token, err = get_token(&p.tok);
-	return prev, err;
+	return p.prev_token, err;
 }
 
 
@@ -60,8 +67,10 @@ expect_token :: proc(p: ^Parser, kind: Kind) -> Error {
 
 parse_value :: proc(p: ^Parser) -> (value: Value, err: Error) {
 	value.pos = p.curr_token.pos;
+	defer value.end = token_end_pos(p.prev_token);
+
 	token := p.curr_token;
-	switch token.kind {
+	#partial switch token.kind {
 	case Kind.Null:
 		value.value = Null{};
 		advance_token(p);
@@ -96,7 +105,7 @@ parse_value :: proc(p: ^Parser) -> (value: Value, err: Error) {
 
 	case:
 		if p.spec == Specification.JSON5 {
-			switch token.kind {
+			#partial switch token.kind {
 			case Kind.Infinity:
 				inf: u64 = 0x7ff0000000000000;
 				if token.text[0] == '-' {
@@ -124,6 +133,7 @@ parse_value :: proc(p: ^Parser) -> (value: Value, err: Error) {
 
 parse_array :: proc(p: ^Parser) -> (value: Value, err: Error) {
 	value.pos = p.curr_token.pos;
+	defer value.end = token_end_pos(p.prev_token);
 	if err = expect_token(p, Kind.Open_Bracket); err != Error.None {
 		return;
 	}
@@ -164,7 +174,7 @@ parse_array :: proc(p: ^Parser) -> (value: Value, err: Error) {
 clone_string :: proc(s: string, allocator: mem.Allocator) -> string {
 	n := len(s);
 	b := make([]byte, n+1, allocator);
-	copy(b, cast([]byte)s);
+	copy(b, s);
 	b[n] = 0;
 	return string(b[:n]);
 }
@@ -192,6 +202,8 @@ parse_object_key :: proc(p: ^Parser) -> (key: string, err: Error) {
 
 parse_object :: proc(p: ^Parser) -> (value: Value, err: Error) {
 	value.pos = p.curr_token.pos;
+	defer value.end = token_end_pos(p.prev_token);
+
 	if err = expect_token(p, Kind.Open_Brace); err != Error.None {
 		value.pos = p.curr_token.pos;
 		return;
@@ -337,7 +349,7 @@ unquote_string :: proc(token: Token, spec: Specification, allocator := context.a
 	}
 
 	b := make([]byte, len(s) + 2*utf8.UTF_MAX, allocator);
-	w := copy(b, cast([]byte)s[0:i]);
+	w := copy(b, s[0:i]);
 	loop: for i < len(s) {
 		c := s[i];
 		switch {
