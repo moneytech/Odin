@@ -341,6 +341,10 @@ void ir_print_proc_type_without_pointer(irFileBuffer *f, irModule *m, Type *t) {
 		// ir_fprintf(f, "* sret noalias ");
 		// ir_write_string(f, str_lit("* noalias "));
 		ir_write_string(f, str_lit("*"));
+		if (build_context.ODIN_OS == "darwin" ||
+		    build_context.ODIN_OS == "linux") {
+			ir_fprintf(f, " byval");
+		}
 		if (param_count > 0 || t->Proc.calling_convention == ProcCC_Odin)  {
 			ir_write_string(f, str_lit(", "));
 		}
@@ -362,6 +366,9 @@ void ir_print_proc_type_without_pointer(irFileBuffer *f, irModule *m, Type *t) {
 					ir_print_type(f, m, et->Tuple.variables[j]->type);
 					if (e->flags&EntityFlag_NoAlias) {
 						ir_write_str_lit(f, " noalias");
+					}
+					if (e->flags&EntityFlag_ByVal) {
+						ir_write_str_lit(f, " byval");
 					}
 					ir_write_byte(f, ' ');
 					param_index++;
@@ -441,6 +448,13 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 		// case Basic_f16:    ir_write_str_lit(f, "half");                 return;
 		case Basic_f32:    ir_write_str_lit(f, "float");                   return;
 		case Basic_f64:    ir_write_str_lit(f, "double");                  return;
+
+
+		case Basic_f32le:    ir_write_str_lit(f, "float");  return;
+		case Basic_f64le:    ir_write_str_lit(f, "double"); return;
+
+		case Basic_f32be:    ir_write_str_lit(f, "float");   return;
+		case Basic_f64be:    ir_write_str_lit(f, "double");  return;
 
 		// case Basic_complex32:  ir_write_str_lit(f, "%%..complex32");    return;
 		case Basic_complex64:  ir_write_str_lit(f, "%..complex64");        return;
@@ -655,6 +669,18 @@ void ir_print_type(irFileBuffer *f, irModule *m, Type *t, bool in_struct) {
 			ir_write_byte(f, '>');
 		}
 		return;
+
+	case Type_RelativePointer:
+		ir_print_type(f, m, t->RelativePointer.base_integer);
+		return;
+
+	case Type_RelativeSlice:
+		ir_write_byte(f, '{');
+		ir_print_type(f, m, t->RelativePointer.base_integer);
+		ir_write_str_lit(f, ", ");
+		ir_print_type(f, m, t->RelativePointer.base_integer);
+		ir_write_byte(f, '}');
+		return;
 	}
 }
 
@@ -827,6 +853,8 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 		type = core_type(type);
 		u64 u_64 = bit_cast<u64>(value.value_float);
 		u32 u_32 = bit_cast<u32>(cast(f32)value.value_float);
+
+
 	#if 0
 		switch (type->Basic.kind) {
 		case Basic_f32:
@@ -854,13 +882,38 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 		}
 	#else
 		switch (type->Basic.kind) {
-		case Basic_f32: {
+		case Basic_f32:
 			ir_fprintf(f, "bitcast (i32 %u to float)", u_32);
 			break;
-		}
+		case Basic_f32le:
+			if (build_context.endian_kind != TargetEndian_Little) {
+				u_32 = gb_endian_swap32(u_32);
+			}
+			ir_fprintf(f, "bitcast (i32 %u to float)", u_32);
+			break;
+		case Basic_f32be:
+			if (build_context.endian_kind != TargetEndian_Big) {
+				u_32 = gb_endian_swap32(u_32);
+			}
+			ir_fprintf(f, "bitcast (i32 %u to float)", u_32);
+			break;
+
 		case Basic_f64:
 			ir_fprintf(f, "0x%016llx", u_64);
 			break;
+		case Basic_f64le:
+			if (build_context.endian_kind != TargetEndian_Little) {
+				u_64 = gb_endian_swap64(u_64);
+			}
+			ir_fprintf(f, "0x%016llx", u_64);
+			break;
+		case Basic_f64be:
+			if (build_context.endian_kind != TargetEndian_Big) {
+				u_64 = gb_endian_swap64(u_64);
+			}
+			ir_fprintf(f, "0x%016llx", u_64);
+			break;
+
 		default:
 			ir_fprintf(f, "0x%016llx", u_64);
 			break;
@@ -1014,8 +1067,7 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 		} else if (is_type_enumerated_array(type)) {
 			ast_node(cl, CompoundLit, value.value_compound);
 
-			Type *index_type = type->EnumeratedArray.elem;
-			Type *elem_type = type->Array.elem;
+			Type *elem_type = type->EnumeratedArray.elem;
 			isize elem_count = cl->elems.count;
 			if (elem_count == 0) {
 				ir_write_str_lit(f, "zeroinitializer");
@@ -1160,8 +1212,8 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 						Selection sel = lookup_field(type, name, false);
 						Entity *f = type->Struct.fields[sel.index[0]];
 
-						values[f->Variable.field_index] = tav.value;
-						visited[f->Variable.field_index] = true;
+						values[f->Variable.field_src_index] = tav.value;
+						visited[f->Variable.field_src_index] = true;
 					}
 				} else {
 					for_array(i, cl->elems) {
@@ -1171,8 +1223,8 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 						if (tav.mode != Addressing_Invalid) {
 							val = tav.value;
 						}
-						values[f->Variable.field_index]  = val;
-						visited[f->Variable.field_index] = true;
+						values[f->Variable.field_src_index]  = val;
+						visited[f->Variable.field_src_index] = true;
 					}
 				}
 			}
@@ -1191,7 +1243,8 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 			for (isize i = 0; i < value_count; i++) {
 				if (i > 0) ir_write_string(f, str_lit(", "));
 				Entity *e = type->Struct.fields[i];
-				ir_print_compound_element(f, m, values[i], e->type);
+				GB_ASSERT(e->kind == Entity_Variable);
+				ir_print_compound_element(f, m, values[e->Variable.field_src_index], e->type);
 			}
 
 
@@ -1241,18 +1294,17 @@ void ir_print_exact_value(irFileBuffer *f, irModule *m, ExactValue value, Type *
 	}
 	case ExactValue_Procedure: {
 		irValue **found = nullptr;
-		Ast *expr = value.value_procedure;
+		Ast *expr = unparen_expr(value.value_procedure);
 		GB_ASSERT(expr != nullptr);
 
 		if (expr->kind == Ast_ProcLit) {
 			found = map_get(&m->anonymous_proc_lits, hash_pointer(expr));
 		} else {
-			GB_ASSERT(expr->kind == Ast_Ident);
-			Entity *e = entity_of_ident(expr);
+			Entity *e = strip_entity_wrapping(expr);
 			GB_ASSERT(e != nullptr);
 			found = map_get(&m->values, hash_entity(e));
 		}
-		GB_ASSERT(found != nullptr);
+		GB_ASSERT_MSG(found != nullptr, "%s", expr_to_string(expr));
 		irValue *val = *found;
 		ir_print_value(f, m, val, type);
 		break;
@@ -1382,6 +1434,7 @@ void ir_print_calling_convention(irFileBuffer *f, irModule *m, ProcCallingConven
 	switch (cc) {
 	case ProcCC_Odin:        ir_write_str_lit(f, "");       break;
 	case ProcCC_Contextless: ir_write_str_lit(f, "");       break;
+	case ProcCC_Pure:        ir_write_str_lit(f, "");       break;
 	// case ProcCC_CDecl:       ir_write_str_lit(f, "ccc ");   break;
 	case ProcCC_CDecl:       ir_write_str_lit(f, "");   break;
 	case ProcCC_StdCall:     ir_write_str_lit(f, "cc 64 "); break;
@@ -1482,6 +1535,28 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 		ir_print_debug_location(f, m, value);
 		break;
 	}
+
+	case irInstr_InlineCode:
+		{
+			switch (instr->InlineCode.id) {
+			case BuiltinProc_alloca:
+				ir_fprintf(f, "%%%d = ", value->index);
+				ir_write_str_lit(f, "alloca i8, ");
+				ir_print_type(f, m, ir_type(instr->InlineCode.operands[0]));
+				ir_write_str_lit(f, " ");
+				ir_print_value(f, m, instr->InlineCode.operands[0], ir_type(instr->InlineCode.operands[0]));
+				ir_write_str_lit(f, ", align ");
+				ir_print_value(f, m, instr->InlineCode.operands[1], t_i32);
+				break;
+
+			case BuiltinProc_cpu_relax:
+				ir_write_str_lit(f, "call void asm sideeffect \"pause\", \"\"()");
+				break;
+			default: GB_PANIC("Unknown inline code %d", instr->InlineCode.id); break;
+			}
+		}
+		break;
+
 
 	case irInstr_AtomicFence:
 		ir_write_str_lit(f, "fence ");
@@ -2172,6 +2247,9 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 							if (e->flags&EntityFlag_NoAlias) {
 								ir_write_str_lit(f, " noalias");
 							}
+							if (e->flags&EntityFlag_ByVal) {
+								ir_write_str_lit(f, " byval");
+							}
 							ir_write_byte(f, ' ');
 							ir_print_value(f, m, arg, t);
 							param_index++;
@@ -2183,6 +2261,9 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 						}
 						if (e->flags&EntityFlag_ImplicitReference) {
 							ir_write_str_lit(f, " nonnull dereferenceable");
+						}
+						if (e->flags&EntityFlag_ByVal) {
+							ir_write_str_lit(f, " byval");
 						}
 						ir_write_byte(f, ' ');
 						irValue *arg = call->args[arg_index++];
@@ -2224,6 +2305,9 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 							if (e->flags&EntityFlag_NoAlias) {
 								ir_write_str_lit(f, " noalias");
 							}
+							if (e->flags&EntityFlag_ByVal) {
+								ir_write_str_lit(f, " byval");
+							}
 							ir_write_byte(f, ' ');
 							ir_print_value(f, m, arg, t);
 							param_index++;
@@ -2233,6 +2317,9 @@ void ir_print_instr(irFileBuffer *f, irModule *m, irValue *value) {
 						ir_print_type(f, m, t);
 						if (e->flags&EntityFlag_NoAlias) {
 							ir_write_str_lit(f, " noalias");
+						}
+						if (e->flags&EntityFlag_ByVal) {
+							ir_write_str_lit(f, " byval");
 						}
 						ir_write_byte(f, ' ');
 						ir_print_value(f, m, arg, t);
@@ -2318,10 +2405,8 @@ void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
 	} else {
 		ir_write_byte(f, '\n');
 		ir_write_str_lit(f, "define ");
-		if (build_context.is_dll) {
-			if (proc->is_export) {
-				ir_write_str_lit(f, "dllexport ");
-			}
+		if (proc->is_export) {
+			ir_write_str_lit(f, "dllexport ");
 		}
 		// if (!proc->is_export && !proc->is_foreign && !proc->is_entry_point) {
 			// ir_write_string(f, "internal ");
@@ -2352,6 +2437,10 @@ void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
 	if (proc_type->return_by_pointer) {
 		ir_print_type(f, m, reduce_tuple_to_single_type(proc_type->results));
 		ir_write_str_lit(f, "* sret noalias ");
+		if (build_context.ODIN_OS == "darwin" ||
+		    build_context.ODIN_OS == "linux") {
+			ir_fprintf(f, "byval ");
+		}
 		ir_write_str_lit(f, "%agg.result");
 		param_index += 1;
 	}
@@ -2378,6 +2467,10 @@ void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
 						if (e->flags&EntityFlag_NoAlias) {
 							ir_write_str_lit(f, " noalias");
 						}
+						if (e->flags&EntityFlag_ByVal) {
+							ir_write_str_lit(f, " byval");
+						}
+
 
 						if (proc->body != nullptr) {
 							ir_fprintf(f, " %%_.%td", parameter_index+j);
@@ -2389,6 +2482,9 @@ void ir_print_proc(irFileBuffer *f, irModule *m, irProcedure *proc) {
 					ir_print_type(f, m, abi_type);
 					if (e->flags&EntityFlag_NoAlias) {
 						ir_write_str_lit(f, " noalias");
+					}
+					if (e->flags&EntityFlag_ByVal) {
+						ir_write_str_lit(f, " byval");
 					}
 					if (proc->body != nullptr) {
 						ir_fprintf(f, " %%_.%td", parameter_index);
@@ -2578,16 +2674,16 @@ void print_llvm_ir(irGen *ir) {
 
 	ir_write_str_lit(f, "declare void @llvm.dbg.declare(metadata, metadata, metadata) #3 \n");
 
-	if (map_get(&m->members, hash_string(str_lit("llvm.bswap.i16"))) == nullptr) {
+	if (string_map_get(&m->members, str_lit("llvm.bswap.i16")) == nullptr) {
 		ir_write_str_lit(f, "declare i16 @llvm.bswap.i16(i16) \n");
 	}
-	if (map_get(&m->members, hash_string(str_lit("llvm.bswap.i32"))) == nullptr) {
+	if (string_map_get(&m->members, str_lit("llvm.bswap.i32")) == nullptr) {
 		ir_write_str_lit(f, "declare i32 @llvm.bswap.i32(i32) \n");
 	}
-	if (map_get(&m->members, hash_string(str_lit("llvm.bswap.i64"))) == nullptr) {
+	if (string_map_get(&m->members, str_lit("llvm.bswap.i64")) == nullptr) {
 		ir_write_str_lit(f, "declare i64 @llvm.bswap.i64(i64) \n");
 	}
-	if (map_get(&m->members, hash_string(str_lit("llvm.bswap.i128"))) == nullptr) {
+	if (string_map_get(&m->members, str_lit("llvm.bswap.i128")) == nullptr) {
 		ir_write_str_lit(f, "declare i128 @llvm.bswap.i128(i128) \n");
 	}
 	ir_write_byte(f, '\n');
@@ -2660,10 +2756,8 @@ void print_llvm_ir(irGen *ir) {
 		if (g->is_foreign) {
 			ir_write_string(f, str_lit("external "));
 		}
-		if (build_context.is_dll) {
-			if (g->is_export) {
-				ir_write_string(f, str_lit("dllexport "));
-			}
+		if (g->is_export) {
+			ir_write_string(f, str_lit("dllexport "));
 		}
 
 		if (g->is_private) {

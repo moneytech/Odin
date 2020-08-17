@@ -5,6 +5,7 @@ package runtime
 
 import "core:os"
 import "intrinsics"
+_ :: intrinsics;
 
 // Naming Conventions:
 // In general, Ada_Case for types and snake_case for values
@@ -24,7 +25,7 @@ import "intrinsics"
 // implemented within the compiler rather than in this "preload" file
 
 // NOTE(bill): This must match the compiler's
-Calling_Convention :: enum {
+Calling_Convention :: enum u8 {
 	Invalid     = 0,
 	Odin        = 1,
 	Contextless = 2,
@@ -33,11 +34,7 @@ Calling_Convention :: enum {
 	Fast        = 5,
 }
 
-Type_Info_Enum_Value :: union {
-	rune,
-	i8, i16, i32, i64, int,
-	u8, u16, u32, u64, uint, uintptr,
-};
+Type_Info_Enum_Value :: distinct i64;
 
 Platform_Endianness :: enum u8 {
 	Platform = 0,
@@ -56,7 +53,7 @@ Type_Info_Struct_Soa_Kind :: enum u8 {
 Type_Info_Named      :: struct {name: string, base: ^Type_Info};
 Type_Info_Integer    :: struct {signed: bool, endianness: Platform_Endianness};
 Type_Info_Rune       :: struct {};
-Type_Info_Float      :: struct {};
+Type_Info_Float      :: struct {endianness: Platform_Endianness};
 Type_Info_Complex    :: struct {};
 Type_Info_Quaternion :: struct {};
 Type_Info_String     :: struct {is_cstring: bool};
@@ -142,7 +139,15 @@ Type_Info_Simd_Vector :: struct {
 	elem_size:  int,
 	count:      int,
 	is_x86_mmx: bool,
-}
+};
+Type_Info_Relative_Pointer :: struct {
+	pointer:      ^Type_Info,
+	base_integer: ^Type_Info,
+};
+Type_Info_Relative_Slice :: struct {
+	slice:        ^Type_Info,
+	base_integer: ^Type_Info,
+};
 
 Type_Info :: struct {
 	size:  int,
@@ -175,6 +180,8 @@ Type_Info :: struct {
 		Type_Info_Bit_Set,
 		Type_Info_Opaque,
 		Type_Info_Simd_Vector,
+		Type_Info_Relative_Pointer,
+		Type_Info_Relative_Slice,
 	},
 }
 
@@ -204,6 +211,9 @@ Typeid_Kind :: enum u8 {
 	Bit_Field,
 	Bit_Set,
 	Opaque,
+	Simd_Vector,
+	Relative_Pointer,
+	Relative_Slice,
 }
 #assert(len(Typeid_Kind) < 32);
 
@@ -224,6 +234,9 @@ args__: []cstring;
 
 // IMPORTANT NOTE(bill): Must be in this order (as the compiler relies upon it)
 
+@builtin
+Maybe :: union(T: typeid) #maybe {T};
+
 
 Source_Code_Location :: struct {
 	file_path:    string,
@@ -241,6 +254,16 @@ Allocator_Mode :: enum byte {
 	Free,
 	Free_All,
 	Resize,
+	Query_Features,
+	Query_Info,
+}
+
+Allocator_Mode_Set :: distinct bit_set[Allocator_Mode];
+
+Allocator_Query_Info :: struct {
+	pointer:   rawptr,
+	size:      Maybe(int),
+	alignment: Maybe(int),
 }
 
 Allocator_Proc :: #type proc(allocator_data: rawptr, mode: Allocator_Mode,
@@ -253,12 +276,12 @@ Allocator :: struct {
 
 // Logging stuff
 
-Logger_Level :: enum {
-	Debug,
-	Info,
-	Warning,
-	Error,
-	Fatal,
+Logger_Level :: enum uint {
+	Debug   = 0,
+	Info    = 10,
+	Warning = 20,
+	Error   = 30,
+	Fatal   = 40,
 }
 
 Logger_Option :: enum {
@@ -269,16 +292,18 @@ Logger_Option :: enum {
 	Long_File_Path,
 	Line,
 	Procedure,
-	Terminal_Color
+	Terminal_Color,
+	Thread_Id
 }
 
 Logger_Options :: bit_set[Logger_Option];
 Logger_Proc :: #type proc(data: rawptr, level: Logger_Level, text: string, options: Logger_Options, location := #caller_location);
 
 Logger :: struct {
-	procedure: Logger_Proc,
-	data:      rawptr,
-	options:   Logger_Options,
+	procedure:    Logger_Proc,
+	data:         rawptr,
+	lowest_level: Logger_Level,
+	options:      Logger_Options,
 }
 
 Context :: struct {
@@ -287,17 +312,12 @@ Context :: struct {
 	assertion_failure_proc: Assertion_Failure_Proc,
 	logger:                 Logger,
 
-	stdin:  os.Handle,
-	stdout: os.Handle,
-	stderr: os.Handle,
-
 	thread_id:  int,
 
 	user_data:  any,
 	user_ptr:   rawptr,
 	user_index: int,
 }
-
 
 
 
@@ -412,7 +432,7 @@ typeid_base_without_enum :: typeid_core;
 
 
 
-@(default_calling_convention = "c")
+@(default_calling_convention = "none")
 foreign {
 	@(link_name="llvm.assume")
 	assume :: proc(cond: bool) ---;
@@ -434,9 +454,15 @@ default_logger_proc :: proc(data: rawptr, level: Logger_Level, text: string, opt
 }
 
 default_logger :: proc() -> Logger {
-	return Logger{default_logger_proc, nil, nil};
+	return Logger{default_logger_proc, nil, Logger_Level.Debug, nil};
 }
 
+
+default_context :: proc "contextless" () -> Context {
+	c: Context;
+	__init_context(&c);
+	return c;
+}
 
 @private
 __init_context_from_ptr :: proc "contextless" (c: ^Context, other: ^Context) {
@@ -462,9 +488,9 @@ __init_context :: proc "contextless" (c: ^Context) {
 	c.logger.procedure = default_logger_proc;
 	c.logger.data = nil;
 
-	c.stdin  = os.stdin;
-	c.stdout = os.stdout;
-	c.stderr = os.stderr;
+	// c.stdin  = os.stdin;
+	// c.stdout = os.stdout;
+	// c.stderr = os.stderr;
 }
 
 @builtin
@@ -473,7 +499,7 @@ init_global_temporary_allocator :: proc(data: []byte, backup_allocator := contex
 }
 
 default_assertion_failure_proc :: proc(prefix, message: string, loc: Source_Code_Location) {
-	fd := context.stderr;
+	fd := os.stderr;
 	print_caller_location(fd, loc);
 	os.write_string(fd, " ");
 	os.write_string(fd, prefix);
@@ -490,16 +516,16 @@ default_assertion_failure_proc :: proc(prefix, message: string, loc: Source_Code
 @builtin
 copy_slice :: proc "contextless" (dst, src: $T/[]$E) -> int {
 	n := max(0, min(len(dst), len(src)));
-	#no_bounds_check if n > 0 do mem_copy(&dst[0], &src[0], n*size_of(E));
+	if n > 0 {
+		mem_copy(raw_data(dst), raw_data(src), n*size_of(E));
+	}
 	return n;
 }
 @builtin
 copy_from_string :: proc "contextless" (dst: $T/[]$E/u8, src: $S/string) -> int {
 	n := max(0, min(len(dst), len(src)));
 	if n > 0 {
-		d := (transmute(Raw_Slice)dst).data;
-		s := (transmute(Raw_String)src).data;
-		mem_copy(d, s, n);
+		mem_copy(raw_data(dst), raw_data(src), n);
 	}
 	return n;
 }
@@ -507,16 +533,6 @@ copy_from_string :: proc "contextless" (dst: $T/[]$E/u8, src: $S/string) -> int 
 copy :: proc{copy_slice, copy_from_string};
 
 
-
-
-@builtin
-pop :: proc "contextless" (array: ^$T/[dynamic]$E) -> E {
-	if array == nil do return E{};
-	assert(len(array) > 0);
-	res := #no_bounds_check array[len(array)-1];
-	(^Raw_Dynamic_Array)(array).len -= 1;
-	return res;
-}
 
 @builtin
 unordered_remove :: proc(array: ^$D/[dynamic]$T, index: int, loc := #caller_location) {
@@ -535,6 +551,53 @@ ordered_remove :: proc(array: ^$D/[dynamic]$T, index: int, loc := #caller_locati
 		copy(array[index:], array[index+1:]);
 	}
 	pop(array);
+}
+
+
+@builtin
+pop :: proc(array: ^$T/[dynamic]$E) -> E {
+	if len(array) == 0 {
+		return E{};
+	}
+	assert(len(array) > 0);
+	res := #no_bounds_check array[len(array)-1];
+	(^Raw_Dynamic_Array)(array).len -= 1;
+	return res;
+}
+
+
+@builtin
+pop_safe :: proc(array: ^$T/[dynamic]$E) -> (E, bool) {
+	if len(array) == 0 {
+		return E{}, false;
+	}
+	res :=  #no_bounds_check array[len(array)-1];
+	(^Raw_Dynamic_Array)(array).len -= 1;
+	return res, true;
+}
+
+@builtin
+pop_front :: proc(array: ^$T/[dynamic]$E) -> E #no_bounds_check {
+	assert(len(array) > 0);
+	res := array[0];
+	if len(array) > 1 {
+		copy(array[0:], array[1:]);
+	}
+	(^Raw_Dynamic_Array)(array).len -= 1;
+	return res;
+}
+
+@builtin
+pop_front_safe :: proc(array: ^$T/[dynamic]$E) -> (E, bool) #no_bounds_check {
+	if len(array) == 0 {
+		return E{}, false;
+	}
+	res := array[0];
+	if len(array) > 1 {
+		copy(array[0:], array[1:]);
+	}
+	(^Raw_Dynamic_Array)(array).len -= 1;
+	return res, true;
 }
 
 
@@ -558,7 +621,7 @@ free_all :: proc{mem_free_all};
 
 @builtin
 delete_string :: proc(str: string, allocator := context.allocator, loc := #caller_location) {
-	mem_free((transmute(Raw_String)str).data, allocator, loc);
+	mem_free(raw_data(str), allocator, loc);
 }
 @builtin
 delete_cstring :: proc(str: cstring, allocator := context.allocator, loc := #caller_location) {
@@ -566,11 +629,11 @@ delete_cstring :: proc(str: cstring, allocator := context.allocator, loc := #cal
 }
 @builtin
 delete_dynamic_array :: proc(array: $T/[dynamic]$E, loc := #caller_location) {
-	mem_free((transmute(Raw_Dynamic_Array)array).data, array.allocator, loc);
+	mem_free(raw_data(array), array.allocator, loc);
 }
 @builtin
 delete_slice :: proc(array: $T/[]$E, allocator := context.allocator, loc := #caller_location) {
-	mem_free((transmute(Raw_Slice)array).data, allocator, loc);
+	mem_free(raw_data(array), allocator, loc);
 }
 @builtin
 delete_map :: proc(m: $T/map[$K]$V, loc := #caller_location) {
@@ -607,7 +670,10 @@ new_clone :: inline proc(data: $T, allocator := context.allocator, loc := #calle
 make_aligned :: proc($T: typeid/[]$E, auto_cast len: int, alignment: int, allocator := context.allocator, loc := #caller_location) -> T {
 	make_slice_error_loc(loc, len);
 	data := mem_alloc(size_of(E)*len, alignment, allocator, loc);
-	if data == nil do return nil;
+	if data == nil && size_of(E) != 0 {
+		return nil;
+	}
+	// mem_zero(data, size_of(E)*len);
 	s := Raw_Slice{data, len};
 	return transmute(T)s;
 }
@@ -632,9 +698,10 @@ make_dynamic_array_len_cap :: proc($T: typeid/[dynamic]$E, auto_cast len: int, a
 	make_dynamic_array_error_loc(loc, len, cap);
 	data := mem_alloc(size_of(E)*cap, align_of(E), allocator, loc);
 	s := Raw_Dynamic_Array{data, len, cap, allocator};
-	if data == nil {
+	if data == nil && size_of(E) != 0 {
 		s.len, s.cap = 0, 0;
 	}
+	// mem_zero(data, size_of(E)*cap);
 	return transmute(T)s;
 }
 
@@ -688,17 +755,19 @@ append_elem :: proc(array: ^$T/[dynamic]$E, arg: E, loc := #caller_location)  {
 
 	arg_len := 1;
 
-	if cap(array) <= len(array)+arg_len {
+	if cap(array) < len(array)+arg_len {
 		cap := 2 * cap(array) + max(8, arg_len);
 		_ = reserve(array, cap, loc);
 	}
 	arg_len = min(cap(array)-len(array), arg_len);
 	if arg_len > 0 {
 		a := (^Raw_Dynamic_Array)(array);
-		data := (^E)(a.data);
-		assert(data != nil);
-		val := arg;
-		mem_copy(ptr_offset(data, a.len), &val, size_of(E));
+		if size_of(E) != 0 {
+			data := (^E)(a.data);
+			assert(data != nil);
+			val := arg;
+			mem_copy(ptr_offset(data, a.len), &val, size_of(E));
+		}
 		a.len += arg_len;
 	}
 }
@@ -710,16 +779,18 @@ append_elems :: proc(array: ^$T/[dynamic]$E, args: ..E, loc := #caller_location)
 	if arg_len <= 0 do return;
 
 
-	if cap(array) <= len(array)+arg_len {
+	if cap(array) < len(array)+arg_len {
 		cap := 2 * cap(array) + max(8, arg_len);
 		_ = reserve(array, cap, loc);
 	}
 	arg_len = min(cap(array)-len(array), arg_len);
 	if arg_len > 0 {
 		a := (^Raw_Dynamic_Array)(array);
-		data := (^E)(a.data);
-		assert(data != nil);
-		mem_copy(ptr_offset(data, a.len), &args[0], size_of(E) * arg_len);
+		if size_of(E) != 0 {
+			data := (^E)(a.data);
+			assert(data != nil);
+			mem_copy(ptr_offset(data, a.len), &args[0], size_of(E) * arg_len);
+		}
 		a.len += arg_len;
 	}
 }
@@ -1049,6 +1120,9 @@ card :: proc(s: $S/bit_set[$E; $U]) -> int {
 	} else when size_of(S) == 8 {
 		foreign { @(link_name="llvm.ctpop.i64") count_ones :: proc(i: u64) -> u64 --- }
 		return int(count_ones(transmute(u64)s));
+	} else when size_of(S) == 16 {
+		foreign { @(link_name="llvm.ctpop.i128") count_ones :: proc(i: u128) -> u128 --- }
+		return int(count_ones(transmute(u128)s));
 	} else {
 		#assert(false);
 		return 0;
@@ -1057,6 +1131,27 @@ card :: proc(s: $S/bit_set[$E; $U]) -> int {
 
 
 
+@builtin
+raw_array_data :: proc "contextless" (a: $P/^($T/[$N]$E)) -> ^E {
+	return (^E)(a);
+}
+@builtin
+raw_slice_data :: proc "contextless" (s: $S/[]$E) -> ^E {
+	ptr := (transmute(Raw_Slice)s).data;
+	return (^E)(ptr);
+}
+@builtin
+raw_dynamic_array_data :: proc "contextless" (s: $S/[dynamic]$E) -> ^E {
+	ptr := (transmute(Raw_Dynamic_Array)s).data;
+	return (^E)(ptr);
+}
+@builtin
+raw_string_data :: proc "contextless" (s: $S/string) -> ^u8 {
+	return (transmute(Raw_String)s).data;
+}
+
+@builtin
+raw_data :: proc{raw_array_data, raw_slice_data, raw_dynamic_array_data, raw_string_data};
 
 
 
@@ -1140,11 +1235,12 @@ __dynamic_array_reserve :: proc(array_: rawptr, elem_size, elem_align: int, cap:
 	allocator := array.allocator;
 
 	new_data := allocator.procedure(allocator.data, .Resize, new_size, elem_align, array.data, old_size, 0, loc);
-	if new_data == nil do return false;
-
-	array.data = new_data;
-	array.cap = cap;
-	return true;
+	if new_data != nil || elem_size == 0 {
+		array.data = new_data;
+		array.cap = cap;
+		return true;
+	}
+	return false;
 }
 
 __dynamic_array_resize :: proc(array_: rawptr, elem_size, elem_align: int, len: int, loc := #caller_location) -> bool {
@@ -1253,7 +1349,7 @@ __get_map_key :: proc "contextless" (k: $K) -> Map_Key {
 	return map_key;
 }
 
-_fnv64a :: proc(data: []byte, seed: u64 = 0xcbf29ce484222325) -> u64 {
+_fnv64a :: proc "contextless" (data: []byte, seed: u64 = 0xcbf29ce484222325) -> u64 {
 	h: u64 = seed;
 	for b in data {
 		h = (h ~ u64(b)) * 0x100000001b3;
@@ -1262,10 +1358,10 @@ _fnv64a :: proc(data: []byte, seed: u64 = 0xcbf29ce484222325) -> u64 {
 }
 
 
-default_hash :: proc(data: []byte) -> u64 {
+default_hash :: proc "contextless" (data: []byte) -> u64 {
 	return _fnv64a(data);
 }
-default_hash_string :: proc(s: string) -> u64 do return default_hash(transmute([]byte)(s));
+default_hash_string :: proc "contextless" (s: string) -> u64 do return default_hash(transmute([]byte)(s));
 
 
 source_code_location_hash :: proc(s: Source_Code_Location) -> u64 {

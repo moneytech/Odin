@@ -33,6 +33,7 @@ template <typename T> Array<T> array_make          (gbAllocator const &a, isize 
 template <typename T> Array<T> array_make_from_ptr (T *data, isize count, isize capacity);
 template <typename T> void     array_free          (Array<T> *array);
 template <typename T> void     array_add           (Array<T> *array, T const &t);
+template <typename T> T *      array_add_and_get   (Array<T> *array);
 template <typename T> void     array_add_elems     (Array<T> *array, T const *elems, isize elem_count);
 template <typename T> T        array_pop           (Array<T> *array);
 template <typename T> void     array_clear         (Array<T> *array);
@@ -40,6 +41,8 @@ template <typename T> void     array_reserve       (Array<T> *array, isize capac
 template <typename T> void     array_resize        (Array<T> *array, isize count);
 template <typename T> void     array_set_capacity  (Array<T> *array, isize capacity);
 template <typename T> Array<T> array_slice         (Array<T> const &array, isize lo, isize hi);
+template <typename T> Array<T> array_clone         (gbAllocator const &a, Array<T> const &array);
+
 
 
 template <typename T> void array_ordered_remove  (Array<T> *array, isize index);
@@ -159,6 +162,18 @@ void array_add(Array<T> *array, T const &t) {
 }
 
 template <typename T>
+T *array_add_and_get(Array<T> *array) {
+	if (array->count < array->capacity) {
+		return &array->data[array->count++];
+	}
+	if (array->capacity < array->count+1) {
+		array__grow(array, 0);
+	}
+	return &array->data[array->count++];
+}
+
+
+template <typename T>
 void array_add_elems(Array<T> *array, T const *elems, isize elem_count) {
 	GB_ASSERT(elem_count >= 0);
 	if (array->capacity < array->count+elem_count) {
@@ -229,6 +244,15 @@ gb_inline Array<T> array_slice(Array<T> const &array, isize lo, isize hi) {
 	}
 	return out;
 }
+
+template <typename T>
+Array<T> array_clone(gbAllocator const &allocator, Array<T> const &array) {
+	auto clone = array_make<T>(allocator, array.count, array.count);
+	array_copy(&clone, array, 0);
+	return clone;
+}
+
+
 template <typename T>
 void array_ordered_remove(Array<T> *array, isize index) {
 	GB_ASSERT(0 <= index && index < array->count);

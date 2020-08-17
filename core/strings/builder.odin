@@ -8,9 +8,26 @@ Builder :: struct {
 	buf: [dynamic]byte,
 }
 
-make_builder :: proc(allocator := context.allocator) -> Builder {
+make_builder_none :: proc(allocator := context.allocator) -> Builder {
 	return Builder{make([dynamic]byte, allocator)};
 }
+
+make_builder_len :: proc(len: int, allocator := context.allocator) -> Builder {
+	return Builder{make([dynamic]byte, len, allocator)};
+}
+
+make_builder_len_cap :: proc(len, cap: int, allocator := context.allocator) -> Builder {
+	return Builder{make([dynamic]byte, len, cap, allocator)};
+}
+
+make_builder :: proc{
+	make_builder_none,
+	make_builder_len,
+	make_builder_len_cap,
+};
+
+
+
 
 destroy_builder :: proc(b: ^Builder) {
 	delete(b.buf);
@@ -68,6 +85,24 @@ write_string :: proc(b: ^Builder, s: string) {
 write_bytes :: proc(b: ^Builder, x: []byte) {
 	append(&b.buf, ..x);
 }
+
+pop_byte :: proc(b: ^Builder) -> (r: byte) {
+	if len(b.buf) == 0 {
+		return 0;
+	}
+	r = b.buf[len(b.buf)-1];
+	d := cast(^mem.Raw_Dynamic_Array)&b.buf;
+	d.len = max(d.len-1, 0);
+	return;
+}
+
+pop_rune :: proc(b: ^Builder) -> (r: rune, width: int) {
+	r, width = utf8.decode_last_rune(b.buf[:]);
+	d := cast(^mem.Raw_Dynamic_Array)&b.buf;
+	d.len = max(d.len-width, 0);
+	return;
+}
+
 
 @(private, static)
 DIGITS_LOWER := "0123456789abcdefx";

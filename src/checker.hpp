@@ -43,6 +43,8 @@ enum StmtFlag {
 	Stmt_ContinueAllowed    = 1<<1,
 	Stmt_FallthroughAllowed = 1<<2,
 
+	Stmt_TypeSwitch = 1<<4,
+
 	Stmt_CheckScopeDecls    = 1<<5,
 };
 
@@ -87,6 +89,7 @@ enum DeferredProcedureKind {
 	DeferredProcedure_none,
 	DeferredProcedure_in,
 	DeferredProcedure_out,
+	DeferredProcedure_in_out,
 };
 struct DeferredProcedure {
 	DeferredProcedureKind kind;
@@ -98,7 +101,7 @@ struct AttributeContext {
 	bool    is_export;
 	bool    is_static;
 	bool    require_results;
-	bool    force_foreign_import;
+	bool    require_declaration;
 	bool    has_disabled_proc;
 	bool    disabled_proc;
 	String  link_name;
@@ -107,6 +110,7 @@ struct AttributeContext {
 	String  thread_local_model;
 	String  deprecated_message;
 	DeferredProcedure deferred_procedure;
+	struct TypeAtomOpTable *atom_op_table;
 };
 
 AttributeContext make_attribute_context(String link_prefix) {
@@ -134,6 +138,7 @@ struct DeclInfo {
 	Ast *         proc_lit;      // Ast_ProcLit
 	Type *        gen_proc_type; // Precalculated
 	bool          is_using;
+	bool          where_clauses_evaluated;
 
 	PtrSet<Entity *>  deps;
 	PtrSet<Type *>    type_info_deps;
@@ -154,7 +159,7 @@ struct ProcInfo {
 
 
 
-enum ScopeFlag {
+enum ScopeFlag : i32 {
 	ScopeFlag_Pkg    = 1<<1,
 	ScopeFlag_Global = 1<<2,
 	ScopeFlag_File   = 1<<3,
@@ -163,7 +168,11 @@ enum ScopeFlag {
 	ScopeFlag_Type   = 1<<6,
 
 	ScopeFlag_HasBeenImported = 1<<10, // This is only applicable to file scopes
+
+	ScopeFlag_ContextDefined = 1<<16,
 };
+
+enum { DEFAULT_SCOPE_CAPACITY = 29 };
 
 struct Scope {
 	Ast *         node;
@@ -172,7 +181,7 @@ struct Scope {
 	Scope *       next;
 	Scope *       first_child;
 	Scope *       last_child;
-	Map<Entity *> elements; // Key: String
+	StringMap<Entity *> elements;
 
 	Array<Ast *>    delayed_directives;
 	Array<Ast *>    delayed_imports;
@@ -182,6 +191,7 @@ struct Scope {
 	union {
 		AstPackage *pkg;
 		AstFile *   file;
+		Entity *    procedure_entity;
 	};
 };
 
@@ -231,15 +241,20 @@ struct ForeignContext {
 typedef Array<Entity *> CheckerTypePath;
 typedef Array<Type *>   CheckerPolyPath;
 
+struct AtomOpMapEntry {
+	u32  kind;
+	Ast *node;
+};
+
 
 // CheckerInfo stores all the symbol information for a type-checked program
 struct CheckerInfo {
 	Map<ExprInfo>         untyped; // Key: Ast * | Expression -> ExprInfo
 	                               // NOTE(bill): This needs to be a map and not on the Ast
 	                               // as it needs to be iterated across
-	Map<AstFile *>        files;           // Key: String (full path)
-	Map<AstPackage *>     packages;        // Key: String (full path)
-	Map<Entity *>         foreigns;        // Key: String
+	StringMap<AstFile *>    files;    // Key (full path)
+	StringMap<AstPackage *> packages; // Key (full path)
+	StringMap<Entity *>     foreigns;
 	Array<Entity *>       definitions;
 	Array<Entity *>       entities;
 	Array<DeclInfo *>     variable_init_order;
@@ -259,6 +274,9 @@ struct CheckerInfo {
 	PtrSet<isize>         minimum_dependency_type_info_set;
 
 	Array<Entity *>       required_foreign_imports_through_force;
+	Array<Entity *>       required_global_variables;
+
+	Map<AtomOpMapEntry>   atom_op_map; // Key: Ast *
 
 
 	bool allow_identifier_uses;
@@ -280,6 +298,7 @@ struct CheckerContext {
 	String         proc_name;
 	DeclInfo *     curr_proc_decl;
 	Type *         curr_proc_sig;
+	ProcCallingConvention curr_proc_calling_convention;
 	bool           in_proc_sig;
 	ForeignContext foreign_context;
 	gbAllocator    allocator;
@@ -299,6 +318,9 @@ struct CheckerContext {
 	bool       hide_polymorphic_errors;
 	bool       in_polymorphic_specialization;
 	Scope *    polymorphic_scope;
+
+	Ast *assignment_lhs_hint;
+	Ast *unary_address_hint;
 };
 
 struct Checker {
@@ -319,6 +341,7 @@ struct Checker {
 
 gb_global AstPackage *builtin_pkg    = nullptr;
 gb_global AstPackage *intrinsics_pkg = nullptr;
+gb_global AstPackage *config_pkg      = nullptr;
 
 
 HashKey hash_node     (Ast *node)  { return hash_pointer(node); }
@@ -331,7 +354,6 @@ HashKey hash_decl_info(DeclInfo *decl) { return hash_pointer(decl); }
 // CheckerInfo API
 TypeAndValue type_and_value_of_expr (Ast *expr);
 Type *       type_of_expr           (Ast *expr);
-Entity *     entity_of_ident        (Ast *identifier);
 Entity *     implicit_entity_of_node(Ast *clause);
 Scope *      scope_of_node          (Ast *node);
 DeclInfo *   decl_info_of_ident     (Ast *ident);
@@ -344,9 +366,9 @@ isize        type_info_index        (CheckerInfo *i, Type *type, bool error_on_f
 Entity *entity_of_node(Ast *expr);
 
 
-Entity *scope_lookup_current(Scope *s, String name);
-Entity *scope_lookup (Scope *s, String name);
-void    scope_lookup_parent (Scope *s, String name, Scope **scope_, Entity **entity_);
+Entity *scope_lookup_current(Scope *s, String const &name);
+Entity *scope_lookup (Scope *s, String const &name);
+void    scope_lookup_parent (Scope *s, String const &name, Scope **scope_, Entity **entity_);
 Entity *scope_insert (Scope *s, Entity *entity);
 
 
@@ -380,3 +402,5 @@ void destroy_checker_poly_path(CheckerPolyPath *);
 
 void  check_poly_path_push(CheckerContext *c, Type *t);
 Type *check_poly_path_pop (CheckerContext *c);
+
+void init_core_context(Checker *c);

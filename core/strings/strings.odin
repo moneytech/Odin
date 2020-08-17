@@ -1,41 +1,21 @@
 package strings
 
 import "core:mem"
+import "core:unicode"
 import "core:unicode/utf8"
 
-clone :: proc(s: string, allocator := context.allocator) -> string {
-	c := make([]byte, len(s)+1, allocator);
+clone :: proc(s: string, allocator := context.allocator, loc := #caller_location) -> string {
+	c := make([]byte, len(s)+1, allocator, loc);
 	copy(c, s);
 	c[len(s)] = 0;
 	return string(c[:len(s)]);
 }
 
-clone_to_cstring :: proc(s: string, allocator := context.allocator) -> cstring {
-	c := make([]byte, len(s)+1, allocator);
+clone_to_cstring :: proc(s: string, allocator := context.allocator, loc := #caller_location) -> cstring {
+	c := make([]byte, len(s)+1, allocator, loc);
 	copy(c, s);
 	c[len(s)] = 0;
 	return cstring(&c[0]);
-}
-
-@(deprecated="Please use 'strings.clone'")
-new_string :: proc(s: string, allocator := context.allocator) -> string {
-	c := make([]byte, len(s)+1, allocator);
-	copy(c, s);
-	c[len(s)] = 0;
-	return string(c[:len(s)]);
-}
-
-@(deprecated="Please use 'strings.clone_to_cstring'")
-new_cstring :: proc(s: string, allocator := context.allocator) -> cstring {
-	c := make([]byte, len(s)+1, allocator);
-	copy(c, s);
-	c[len(s)] = 0;
-	return cstring(&c[0]);
-}
-
-@(deprecated="Please use a standard cast for cstring to string")
-to_odin_string :: proc(str: cstring) -> string {
-	return string(str);
 }
 
 string_from_ptr :: proc(ptr: ^byte, len: int) -> string {
@@ -52,6 +32,8 @@ unsafe_string_to_cstring :: proc(str: string) -> cstring {
 	return cstring(d.data);
 }
 
+// Compares two strings, returning a value representing which one comes first lexiographically.
+// -1 for `a`; 1 for `b`, or 0 if they are equal.
 compare :: proc(lhs, rhs: string) -> int {
 	return mem.compare(transmute([]byte)lhs, transmute([]byte)rhs);
 }
@@ -323,7 +305,7 @@ last_index :: proc(s, substr: string) -> int {
 	case n == 1:
 		return last_index_byte(s, substr[0]);
 	case n == len(s):
-		return substr == s ? 0 : -1;
+		return 0 if substr == s else -1;
 	case n > len(s):
 		return -1;
 	}
@@ -659,6 +641,7 @@ trim_space :: proc(s: string) -> string {
 	return trim_right_space(trim_left_space(s));
 }
 
+
 trim_left_null :: proc(s: string) -> string {
 	return trim_left_proc(s, is_null);
 }
@@ -671,12 +654,91 @@ trim_null :: proc(s: string) -> string {
 	return trim_right_null(trim_left_null(s));
 }
 
+
+split_multi :: proc(s: string, substrs: []string, skip_empty := false, allocator := context.allocator) -> []string #no_bounds_check {
+	if s == "" || len(substrs) <= 0 {
+		return nil;
+	}
+
+	sublen := len(substrs[0]);
+
+	for substr in substrs[1:] {
+		sublen = min(sublen, len(substr));
+	}
+
+	shared := len(s) - sublen;
+
+	if shared <= 0 {
+		return nil;
+	}
+
+	// number, index, last
+	n, i, l := 0, 0, 0;
+
+	// count results
+	first_pass: for i <= shared {
+		for substr in substrs {
+			if s[i:i+sublen] == substr {
+				if !skip_empty || i - l > 0 {
+					n += 1;
+				}
+
+				i += sublen;
+				l  = i;
+
+				continue first_pass;
+			}
+		}
+
+		_, skip := utf8.decode_rune_in_string(s[i:]);
+		i += skip;
+	}
+
+	if !skip_empty || len(s) - l > 0 {
+		n += 1;
+	}
+
+	if n < 1 {
+		// no results
+		return nil;
+	}
+
+	buf := make([]string, n, allocator);
+
+	n, i, l = 0, 0, 0;
+
+	// slice results
+	second_pass: for i <= shared {
+		for substr in substrs {
+			if s[i:i+sublen] == substr {
+				if !skip_empty || i - l > 0 {
+					buf[n] = s[l:i];
+					n += 1;
+				}
+
+				i += sublen;
+				l  = i;
+
+				continue second_pass;
+			}
+		}
+
+		_, skip := utf8.decode_rune_in_string(s[i:]);
+		i += skip;
+	}
+
+	if !skip_empty || len(s) - l > 0 {
+		buf[n] = s[l:];
+	}
+
+	return buf;
+}
+
 // scrub scruvs invalid utf-8 characters and replaces them with the replacement string
 // Adjacent invalid bytes are only replaced once
 scrub :: proc(s: string, replacement: string, allocator := context.allocator) -> string {
 	str := s;
-	b := make_builder(allocator);;
-	grow_builder(&b, len(str));
+	b := make_builder(0, len(str), allocator);
 
 	has_error := false;
 	cursor := 0;
@@ -704,6 +766,207 @@ scrub :: proc(s: string, replacement: string, allocator := context.allocator) ->
 
 	return to_string(b);
 }
+
+
+to_lower :: proc(s: string, allocator := context.allocator) -> string {
+	b := make_builder(0, len(s), allocator);
+	for r in s {
+		write_rune(&b, unicode.to_lower(r));
+	}
+	return to_string(b);
+}
+to_upper :: proc(s: string, allocator := context.allocator) -> string {
+	b := make_builder(0, len(s), allocator);
+	for r in s {
+		write_rune(&b, unicode.to_upper(r));
+	}
+	return to_string(b);
+}
+
+
+
+
+is_delimiter :: proc(c: rune) -> bool {
+	return c == '-' || c == '_' || is_space(c);
+}
+
+is_separator :: proc(r: rune) -> bool {
+	if r <= 0x7f {
+		switch r {
+		case '0'..'9': return false;
+		case 'a'..'z': return false;
+		case 'A'..'Z': return false;
+		case '_': return false;
+		}
+		return true;
+	}
+
+	// TODO(bill): unicode categories
+	// if unicode.is_letter(r) || unicode.is_digit(r) {
+	// 	return false;
+	// }
+
+	return unicode.is_space(r);
+}
+
+
+string_case_iterator :: proc(b: ^Builder, s: string, callback: proc(b: ^Builder, prev, curr, next: rune)) {
+	prev, curr: rune;
+	for next in s {
+		if curr == 0 {
+			prev = curr;
+			curr = next;
+			continue;
+		}
+
+		callback(b, prev, curr, next);
+
+		prev = curr;
+		curr = next;
+	}
+
+	if len(s) > 0 {
+		callback(b, prev, curr, 0);
+	}
+}
+
+
+to_lower_camel_case :: to_camel_case;
+to_camel_case :: proc(s: string, allocator := context.allocator) -> string {
+	s := s;
+	s = trim_space(s);
+	b := make_builder(0, len(s), allocator);
+
+	string_case_iterator(&b, s, proc(b: ^Builder, prev, curr, next: rune) {
+		if !is_delimiter(curr) {
+			if is_delimiter(prev) {
+				write_rune(b, unicode.to_upper(curr));
+			} else if unicode.is_lower(prev) {
+				write_rune(b, curr);
+			} else {
+				write_rune(b, unicode.to_lower(curr));
+			}
+		}
+	});
+
+	return to_string(b);
+}
+
+to_upper_camel_case :: to_pascal_case;
+to_pascal_case :: proc(s: string, allocator := context.allocator) -> string {
+	s := s;
+	s = trim_space(s);
+	b := make_builder(0, len(s), allocator);
+
+	string_case_iterator(&b, s, proc(b: ^Builder, prev, curr, next: rune) {
+		if !is_delimiter(curr) {
+			if is_delimiter(prev) || prev == 0 {
+				write_rune(b, unicode.to_upper(curr));
+			} else if unicode.is_lower(prev) {
+				write_rune(b, curr);
+			} else {
+				write_rune(b, unicode.to_lower(curr));
+			}
+		}
+	});
+
+	return to_string(b);
+}
+
+to_delimiter_case :: proc(s: string, delimiter: rune, all_upper_case: bool, allocator := context.allocator) -> string {
+	s := s;
+	s = trim_space(s);
+	b := make_builder(0, len(s), allocator);
+
+	adjust_case := unicode.to_upper if all_upper_case else unicode.to_lower;
+
+	prev, curr: rune;
+
+	for next in s {
+		if is_delimiter(curr) {
+			if !is_delimiter(prev) {
+				write_rune(&b, delimiter);
+			}
+		} else if unicode.is_upper(curr) {
+			if unicode.is_lower(prev) || (unicode.is_upper(prev) && unicode.is_lower(next)) {
+				write_rune(&b, delimiter);
+			}
+			write_rune(&b, adjust_case(curr));
+		} else if curr != 0 {
+			write_rune(&b, adjust_case(curr));
+		}
+
+		prev = curr;
+		curr = next;
+	}
+
+	if len(s) > 0 {
+		if unicode.is_upper(curr) && unicode.is_lower(prev) && prev != 0 {
+			write_rune(&b, delimiter);
+		}
+		write_rune(&b, adjust_case(curr));
+	}
+
+	return to_string(b);
+}
+
+
+to_snake_case :: proc(s: string, allocator := context.allocator) -> string {
+	return to_delimiter_case(s, '_', false, allocator);
+}
+
+to_screaming_snake_case :: to_upper_snake_case;
+to_upper_snake_case :: proc(s: string, allocator := context.allocator) -> string {
+	return to_delimiter_case(s, '_', true, allocator);
+}
+
+to_kebab_case :: proc(s: string, allocator := context.allocator) -> string {
+	return to_delimiter_case(s, '-', false, allocator);
+}
+
+to_upper_case :: proc(s: string, allocator := context.allocator) -> string {
+	return to_delimiter_case(s, '-', true, allocator);
+}
+
+to_ada_case :: proc(s: string, allocator := context.allocator) -> string {
+	delimiter :: '_';
+
+	s := s;
+	s = trim_space(s);
+	b := make_builder(0, len(s), allocator);
+
+	prev, curr: rune;
+
+	for next in s {
+		if is_delimiter(curr) {
+			if !is_delimiter(prev) {
+				write_rune(&b, delimiter);
+			}
+		} else if unicode.is_upper(curr) {
+			if unicode.is_lower(prev) || (unicode.is_upper(prev) && unicode.is_lower(next)) {
+				write_rune(&b, delimiter);
+			}
+			write_rune(&b, unicode.to_upper(curr));
+		} else if curr != 0 {
+			write_rune(&b, unicode.to_lower(curr));
+		}
+
+		prev = curr;
+		curr = next;
+	}
+
+	if len(s) > 0 {
+		if unicode.is_upper(curr) && unicode.is_lower(prev) && prev != 0 {
+			write_rune(&b, delimiter);
+			write_rune(&b, unicode.to_upper(curr));
+		} else {
+			write_rune(&b, unicode.to_lower(curr));
+		}
+	}
+
+	return to_string(b);
+}
+
 
 
 reverse :: proc(s: string, allocator := context.allocator) -> string {

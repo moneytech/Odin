@@ -1,10 +1,15 @@
 // This is purely for documentation
 package intrinsics
 
+// Types
 
 x86_mmx :: x86_mmx; // Specialized SIMD Vector type
 
 simd_vector :: proc($N: int, $T: typeid) -> type/#simd[N]T
+soa_struct :: proc($N: int, $T: typeid) -> type/#soa[N]T
+
+
+// Atomics
 
 atomic_fence        :: proc() ---
 atomic_fence_acq    :: proc() ---
@@ -78,6 +83,11 @@ atomic_cxchgweak_failacq            :: proc(dst: ^$T, old, new: T) -> (T, /*opti
 atomic_cxchgweak_acq_failrelaxed    :: proc(dst: ^$T, old, new: T) -> (T, /*option*/bool) ---
 atomic_cxchgweak_acqrel_failrelaxed :: proc(dst: ^$T, old, new: T) -> (T, /*option*/bool) ---
 
+// Instructions
+
+alloca :: proc(size, align: int) -> ^u8 ---
+
+cpu_relax :: proc() ---
 
 // Constant type tests
 
@@ -103,6 +113,7 @@ type_is_ordered         :: proc($T: typeid) -> bool ---
 type_is_ordered_numeric :: proc($T: typeid) -> bool ---
 type_is_indexable       :: proc($T: typeid) -> bool ---
 type_is_sliceable       :: proc($T: typeid) -> bool ---
+type_is_comparable      :: proc($T: typeid) -> bool ---
 type_is_simple_compare  :: proc($T: typeid) -> bool --- // easily compared using memcmp
 type_is_dereferenceable :: proc($T: typeid) -> bool ---
 type_is_valid_map_key   :: proc($T: typeid) -> bool ---
@@ -124,9 +135,15 @@ type_is_bit_field_value  :: proc($T: typeid) -> bool ---
 type_is_bit_set          :: proc($T: typeid) -> bool ---
 type_is_simd_vector      :: proc($T: typeid) -> bool ---
 
-type_is_specialization_of :: proc($T, $S: typeid) -> bool ---
-
 type_has_nil :: proc($T: typeid) -> bool ---
+
+type_is_specialization_of :: proc($T, $S: typeid) -> bool ---
 
 type_proc_parameter_count :: proc($T: typeid) -> int where type_is_proc(T) ---
 type_proc_return_count    :: proc($T: typeid) -> int where type_is_proc(T) ---
+
+type_proc_parameter_type  :: proc($T: typeid, index: int) -> typeid where type_is_proc(T) ---
+type_proc_return_type     :: proc($T: typeid, index: int) -> typeid where type_is_proc(T) ---
+
+type_polymorphic_record_parameter_count :: proc($T: typeid) -> typeid ---
+type_polymorphic_record_parameter_value :: proc($T: typeid, index: int) -> $V ---

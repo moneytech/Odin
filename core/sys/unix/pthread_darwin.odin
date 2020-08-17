@@ -14,11 +14,7 @@ PTHREAD_ONCE_SIZE      :: 8;
 PTHREAD_RWLOCK_SIZE    :: 192;
 PTHREAD_RWLOCKATTR_SIZE :: 16;
 
-pthread_t :: opaque struct #align 16 {
-	sig: c.long,
-	cleanup_stack: rawptr,
-	_: [PTHREAD_SIZE] c.char,
-};
+pthread_t :: opaque u64;
 
 pthread_attr_t :: opaque struct #align 16 {
 	sig: c.long,
@@ -78,3 +74,9 @@ PTHREAD_INHERIT_SCHED :: 1;
 PTHREAD_EXPLICIT_SCHED :: 2;
 PTHREAD_PROCESS_SHARED :: 1;
 PTHREAD_PROCESS_PRIVATE :: 2;
+
+
+PTHREAD_MUTEX_NORMAL :: 0;
+PTHREAD_MUTEX_RECURSIVE :: 1;
+PTHREAD_MUTEX_ERRORCHECK :: 2;
+

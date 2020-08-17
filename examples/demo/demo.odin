@@ -6,6 +6,7 @@ import "core:os"
 import "core:thread"
 import "core:time"
 import "core:reflect"
+import "core:runtime"
 import "intrinsics"
 
 
@@ -1119,7 +1120,6 @@ threading_example :: proc() {
 		for in prefix_table {
 			if t := thread.create(worker_proc); t != nil {
 				t.init_context = context;
-				t.use_init_context = true;
 				t.user_index = len(threads);
 				append(&threads, t);
 				thread.start(t);
@@ -1245,7 +1245,7 @@ implicit_selector_expression :: proc() {
 
 	switch f {
 	case .A:
-		fmt.println("HERE");
+		fmt.println("HITHER");
 	case .B:
 		fmt.println("NEVER");
 	case .C:
@@ -1742,6 +1742,7 @@ range_statements_with_multiple_return_values :: proc() {
 	}
 }
 
+
 soa_struct_layout :: proc() {
 	// IMPORTANT NOTE(bill, 2019-11-03): This feature is subject to be changed/removed
 	// NOTE(bill): Most likely #soa [N]T
@@ -1930,6 +1931,51 @@ union_maybe :: proc() {
 	fmt.println(z, z_ok);
 }
 
+dummy_procedure :: proc() {
+	fmt.println("dummy_procedure");
+}
+
+explicit_context_definition :: proc "c" () {
+	// Try commenting the following statement out below
+	context = runtime.default_context();
+
+	fmt.println("\n#explicit context definition");
+	dummy_procedure();
+}
+
+relative_data_types :: proc() {
+	fmt.println("\n#relative data types");
+
+	x: int = 123;
+	ptr: #relative(i16) ^int;
+	ptr = &x;
+	fmt.println(ptr^);
+
+	arr := [3]int{1, 2, 3};
+	s := arr[:];
+	rel_slice: #relative(i16) []int;
+	rel_slice = s;
+	fmt.println(rel_slice);
+	fmt.println(rel_slice[:]);
+	fmt.println(rel_slice[1]);
+}
+
+pure_procedures :: proc() {
+	fmt.println("\n#pure procedures");
+
+	square :: proc "pure" (x: int) -> int {
+		return x*x + 1;
+	}
+
+	do_math :: proc "pure" (x: int) -> int {
+		// Only "pure" procedure calls are allowed within a "pure" procedure
+		return square(x) + 1;
+	}
+
+	x := do_math(5);
+	fmt.println(x);
+}
+
 main :: proc() {
 	when true {
 		the_basics();
@@ -1960,5 +2006,8 @@ main :: proc() {
 		soa_struct_layout();
 		constant_literal_expressions();
 		union_maybe();
+		explicit_context_definition();
+		relative_data_types();
+		pure_procedures();
 	}
 }

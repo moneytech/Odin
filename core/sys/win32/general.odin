@@ -22,7 +22,7 @@ HKL       :: distinct Handle;
 Wparam    :: distinct Uint_Ptr;
 Lparam    :: distinct Long_Ptr;
 Lresult   :: distinct Long_Ptr;
-Wnd_Proc  :: distinct #type proc "c" (Hwnd, u32, Wparam, Lparam) -> Lresult;
+Wnd_Proc  :: distinct #type proc "std" (Hwnd, u32, Wparam, Lparam) -> Lresult;
 Monitor_Enum_Proc :: distinct #type proc "std" (Hmonitor, Hdc, ^Rect, Lparam) -> bool;
 
 
@@ -33,6 +33,28 @@ Wstring :: distinct ^u16;
 
 Point :: struct {
 	x, y: i32,
+}
+
+Wnd_Class_A :: struct {
+	style:                 u32,
+	wnd_proc:              Wnd_Proc,
+	cls_extra, wnd_extra:  i32,
+	instance:              Hinstance,
+	icon:                  Hicon,
+	cursor:                Hcursor,
+	background:            Hbrush,
+	menu_name, class_name: cstring
+}
+
+Wnd_Class_W :: struct {
+	style:                 u32,
+	wnd_proc:              Wnd_Proc,
+	cls_extra, wnd_extra:  i32,
+	instance:              Hinstance,
+	icon:                  Hicon,
+	cursor:                Hcursor,
+	background:            Hbrush,
+	menu_name, class_name: Wstring
 }
 
 Wnd_Class_Ex_A :: struct {
@@ -532,7 +554,7 @@ WM_CHAR              :: 0x0102;
 WM_CLOSE             :: 0x0010;
 WM_CREATE            :: 0x0001;
 WM_DESTROY           :: 0x0002;
-WM_INPUT             :: 0x00ff;
+WM_INPUT             :: 0x00FF;
 WM_KEYDOWN           :: 0x0100;
 WM_KEYUP             :: 0x0101;
 WM_KILLFOCUS         :: 0x0008;
@@ -546,6 +568,7 @@ WM_SYSKEYUP          :: 0x0105;
 WM_USER              :: 0x0400;
 WM_WINDOWPOSCHANGED  :: 0x0047;
 WM_COMMAND           :: 0x0111;
+WM_PAINT             :: 0x000F;
 
 WM_MOUSEWHEEL    :: 0x020A;
 WM_MOUSEMOVE     :: 0x0200;
@@ -768,8 +791,10 @@ utf8_to_utf16 :: proc(s: string, allocator := context.temp_allocator) -> []u16 {
 	}
 
 	text[n] = 0;
-
-	return text[:len(text)-1];
+	for n >= 1 && text[n-1] == 0 {
+		n -= 1;
+	}
+	return text[:n];
 }
 utf8_to_wstring :: proc(s: string, allocator := context.temp_allocator) -> Wstring {
 	if res := utf8_to_utf16(s, allocator); res != nil {
@@ -778,31 +803,42 @@ utf8_to_wstring :: proc(s: string, allocator := context.temp_allocator) -> Wstri
 	return nil;
 }
 
-utf16_to_utf8 :: proc(s: []u16, allocator := context.temp_allocator) -> string {
-	if len(s) < 1 {
+wstring_to_utf8 :: proc(s: Wstring, N: int, allocator := context.temp_allocator) -> string {
+	if N == 0 {
 		return "";
 	}
 
-	n := wide_char_to_multi_byte(CP_UTF8, WC_ERR_INVALID_CHARS, Wstring(&s[0]), i32(len(s)), nil, 0, nil, nil);
+	n := wide_char_to_multi_byte(CP_UTF8, WC_ERR_INVALID_CHARS, s, i32(N), nil, 0, nil, nil);
 	if n == 0 {
 		return "";
 	}
 
-	text := make([]byte, n+1, allocator);
+	// If N == -1 the call to wide_char_to_multi_byte assume the wide string is null terminated
+	// and will scan it to find the first null terminated character. The resulting string will
+	// also null terminated.
+	// If N != -1 it assumes the wide string is not null terminated and the resulting string
+	// will not be null terminated, we therefore have to force it to be null terminated manually.
+	text := make([]byte, n+1 if N != -1 else n, allocator);
 
-	n1 := wide_char_to_multi_byte(CP_UTF8, WC_ERR_INVALID_CHARS, Wstring(&s[0]), i32(len(s)), cstring(&text[0]), n, nil, nil);
-	if n1 == 0 {
+	if n1 := wide_char_to_multi_byte(CP_UTF8, WC_ERR_INVALID_CHARS, s, i32(N), cstring(&text[0]), n, nil, nil); n1 == 0 {
 		delete(text, allocator);
 		return "";
 	}
 
-	text[n] = 0;
+	for i in 0..<n {
+		if text[i] == 0 {
+			n = i;
+			break;
+		}
+	}
 
-	return string(text[:len(text)-1]);
+	return string(text[:n]);
 }
 
-
-
+utf16_to_utf8 :: proc(s: []u16, allocator := context.temp_allocator) -> string {
+	if len(s) == 0 do return "";
+	return wstring_to_utf8(cast(Wstring)&s[0], len(s), allocator);
+}
 
 get_query_performance_frequency :: proc() -> i64 {
 	r: i64;
@@ -902,6 +938,15 @@ Bitmap_Info_Header :: struct {
 Bitmap_Info :: struct {
 	using header: Bitmap_Info_Header,
 	colors:       [1]Rgb_Quad,
+}
+
+Paint_Struct :: struct {
+	hdc:          Hdc,
+	erase:        Bool,
+	rc_paint:     Rect,
+	restore:      Bool,
+	inc_update:   Bool,
+	rgb_reserved: [32]byte
 }
 
 

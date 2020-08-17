@@ -10,11 +10,11 @@ foreign kernel32 {
 	                                                              				 inherit_handle: Bool, creation_flags: u32, environment: rawptr,
 	                                                              				 current_direcotry: cstring, startup_info: ^Startup_Info,
 	                                                              				 process_information: ^Process_Information) -> Bool ---;
-    @(link_name="CreateProcessW")            create_process_w             :: proc(application_name, command_line: Wstring,
-                                                                                 process_attributes, thread_attributes: ^Security_Attributes,
-                                                                                 inherit_handle: Bool, creation_flags: u32, environment: rawptr,
-                                                                                 current_direcotry: cstring, startup_info: ^Startup_Info,
-                                                                                 process_information: ^Process_Information) -> Bool ---;
+	@(link_name="CreateProcessW")            create_process_w             :: proc(application_name, command_line: Wstring,
+	                                                                             process_attributes, thread_attributes: ^Security_Attributes,
+	                                                                             inherit_handle: Bool, creation_flags: u32, environment: rawptr,
+	                                                                             current_direcotry: Wstring, startup_info: ^Startup_Info,
+	                                                                             process_information: ^Process_Information) -> Bool ---;
 	@(link_name="GetExitCodeProcess")		 get_exit_code_process        :: proc(process: Handle, exit: ^u32) -> Bool ---;
 	@(link_name="ExitProcess")               exit_process                 :: proc(exit_code: u32) ---;
 	@(link_name="GetModuleHandleA")          get_module_handle_a          :: proc(module_name: cstring) -> Hmodule ---;
@@ -34,6 +34,11 @@ foreign kernel32 {
 	@(link_name="GetSystemInfo")             get_system_info              :: proc(info: ^System_Info) ---;
 	@(link_name="GetVersionExA")             get_version                  :: proc(osvi: ^OS_Version_Info_Ex_A) ---;
 	@(link_name="GetCurrentThreadId")        get_current_thread_id        :: proc() -> u32 ---;
+
+	// NOTE(tetra): Not thread safe with SetCurrentDirectory and GetFullPathName;
+	// The current directory is stored as a global variable in the process.
+	@(link_name="GetCurrentDirectoryW")       get_current_directory_w     :: proc(len: u32, buf: Wstring) -> u32 ---;
+	@(link_name="SetCurrentDirectoryW")       set_current_directory_w     :: proc(buf: Wstring) -> u32 ---;
 
 	@(link_name="GetSystemTimeAsFileTime")   get_system_time_as_file_time :: proc(system_time_as_file_time: ^Filetime) ---;
 	@(link_name="FileTimeToLocalFileTime")   file_time_to_local_file_time :: proc(file_time: ^Filetime, local_file_time: ^Filetime) -> Bool ---;
@@ -151,7 +156,7 @@ foreign kernel32 {
 	@(link_name="ReadBarrier")      read_barrier       :: proc() ---;
 
 	@(link_name="CreateThread")
-	create_thread :: proc(thread_attributes: ^Security_Attributes, stack_size: int, start_routine: rawptr,
+	create_thread :: proc(thread_attributes: ^Security_Attributes, stack_size: uint, start_routine: proc "stdcall" (rawptr) -> u32,
 	                      parameter: rawptr, creation_flags: u32, thread_id: ^u32) -> Handle ---;
 	@(link_name="ResumeThread")      resume_thread        :: proc(thread: Handle) -> u32 ---;
 	@(link_name="GetThreadPriority") get_thread_priority  :: proc(thread: Handle) -> i32 ---;
@@ -160,10 +165,10 @@ foreign kernel32 {
 	@(link_name="TerminateThread")   terminate_thread     :: proc(thread: Handle, exit_code: u32) -> Bool ---;
 
 	@(link_name="InitializeCriticalSection")             initialize_critical_section                :: proc(critical_section: ^Critical_Section) ---;
-	@(link_name="InitializeCriticalSectionAndSpinCount") initialize_critical_section_and_spin_count :: proc(critical_section: ^Critical_Section, spin_count: u32) ---;
+	@(link_name="InitializeCriticalSectionAndSpinCount") initialize_critical_section_and_spin_count :: proc(critical_section: ^Critical_Section, spin_count: u32) -> b32 ---;
 	@(link_name="DeleteCriticalSection")                 delete_critical_section                    :: proc(critical_section: ^Critical_Section) ---;
 	@(link_name="SetCriticalSectionSpinCount")           set_critical_section_spin_count            :: proc(critical_section: ^Critical_Section, spin_count: u32) -> u32 ---;
-	@(link_name="TryEnterCriticalSection")               try_enter_critical_section                 :: proc(critical_section: ^Critical_Section) -> Bool ---;
+	@(link_name="TryEnterCriticalSection")               try_enter_critical_section                 :: proc(critical_section: ^Critical_Section) -> b8 ---;
 	@(link_name="EnterCriticalSection")                  enter_critical_section                     :: proc(critical_section: ^Critical_Section) ---;
 	@(link_name="LeaveCriticalSection")                  leave_critical_section                     :: proc(critical_section: ^Critical_Section) ---;
 
@@ -178,6 +183,14 @@ foreign kernel32 {
 	@(link_name="FreeLibrary")    free_library     :: proc(h: Hmodule) -> Bool ---;
 	@(link_name="GetProcAddress") get_proc_address :: proc(h: Hmodule, c_str: cstring) -> rawptr ---;
 
+	@(link_name="GetFullPathNameA")  get_full_path_name_a  :: proc(filename: cstring, buffer_length: u32, buffer: cstring, file_part: ^Wstring) -> u32 ---;
+	@(link_name="GetFullPathNameW")  get_full_path_name_w  :: proc(filename: Wstring, buffer_length: u32, buffer: Wstring, file_part: ^Wstring) -> u32 ---;
+	@(link_name="GetLongPathNameA")  get_long_path_name_a  :: proc(short, long: cstring, len: u32) -> u32 ---;
+	@(link_name="GetLongPathNameW")  get_long_path_name_w  :: proc(short, long: Wstring, len: u32) -> u32 ---;
+	@(link_name="GetShortPathNameA") get_short_path_name_a :: proc(long, short: cstring, len: u32) -> u32 ---;
+	@(link_name="GetShortPathNameW") get_short_path_name_w :: proc(long, short: Wstring, len: u32) -> u32 ---;
+
+	@(link_name="GetCurrentDirectoryA") get_current_directory_a :: proc(buffer_length: u32, buffer: cstring) -> u32 ---;
 }
 
 Memory_Basic_Information :: struct {

@@ -36,6 +36,9 @@ enum BuiltinProcId {
 	BuiltinProc_simd_vector,
 	BuiltinProc_soa_struct,
 
+	BuiltinProc_alloca,
+	BuiltinProc_cpu_relax,
+
 	BuiltinProc_atomic_fence,
 	BuiltinProc_atomic_fence_acq,
 	BuiltinProc_atomic_fence_rel,
@@ -136,6 +139,7 @@ BuiltinProc__type_simple_boolean_begin,
 	BuiltinProc_type_is_ordered_numeric,
 	BuiltinProc_type_is_indexable,
 	BuiltinProc_type_is_sliceable,
+	BuiltinProc_type_is_comparable,
 	BuiltinProc_type_is_simple_compare, // easily compared using memcmp
 	BuiltinProc_type_is_dereferenceable,
 	BuiltinProc_type_is_valid_map_key,
@@ -168,6 +172,9 @@ BuiltinProc__type_simple_boolean_end,
 
 	BuiltinProc_type_proc_parameter_count,
 	BuiltinProc_type_proc_return_count,
+
+	BuiltinProc_type_proc_parameter_type,
+	BuiltinProc_type_proc_return_type,
 
 	BuiltinProc_type_polymorphic_record_parameter_count,
 	BuiltinProc_type_polymorphic_record_parameter_value,
@@ -213,6 +220,9 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	// "Intrinsics"
 	{STR_LIT("simd_vector"), 2, false, Expr_Expr, BuiltinProcPkg_intrinsics}, // Type
 	{STR_LIT("soa_struct"),  2, false, Expr_Expr, BuiltinProcPkg_intrinsics}, // Type
+
+	{STR_LIT("alloca"),    2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+	{STR_LIT("cpu_relax"), 0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
 
 	{STR_LIT("atomic_fence"),        0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
 	{STR_LIT("atomic_fence_acq"),    0, false, Expr_Stmt, BuiltinProcPkg_intrinsics},
@@ -311,6 +321,7 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	{STR_LIT("type_is_ordered_numeric"),   1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_indexable"),         1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_sliceable"),         1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+	{STR_LIT("type_is_comparable"),        1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_simple_compare"),    1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_dereferenceable"),   1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_is_valid_map_key"),     1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
@@ -341,6 +352,9 @@ gb_global BuiltinProc builtin_procs[BuiltinProc_COUNT] = {
 	{STR_LIT("type_is_specialization_of"), 2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_proc_parameter_count"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_proc_return_count"),    1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+
+	{STR_LIT("type_proc_parameter_type"),  2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
+	{STR_LIT("type_proc_return_type"),     2, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 
 	{STR_LIT("type_polymorphic_record_parameter_count"), 1, false, Expr_Expr, BuiltinProcPkg_intrinsics},
 	{STR_LIT("type_polymorphic_record_parameter_value"), 2, false, Expr_Expr, BuiltinProcPkg_intrinsics},

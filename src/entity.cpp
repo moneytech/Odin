@@ -2,6 +2,8 @@ struct Scope;
 struct Checker;
 struct Type;
 struct DeclInfo;
+struct lbModule;
+struct lbProcedure;
 
 
 #define ENTITY_KINDS \
@@ -30,7 +32,7 @@ String const entity_strings[] = {
 #undef ENTITY_KIND
 };
 
-enum EntityFlag {
+enum EntityFlag : u32 {
 	EntityFlag_Visited       = 1<<0,
 	EntityFlag_Used          = 1<<1,
 	EntityFlag_Using         = 1<<2,
@@ -43,13 +45,15 @@ enum EntityFlag {
 	EntityFlag_TypeField     = 1<<9,
 	EntityFlag_Value         = 1<<10,
 	EntityFlag_Sret          = 1<<11,
-	EntityFlag_BitFieldValue = 1<<12,
-	EntityFlag_PolyConst     = 1<<13,
-	EntityFlag_NotExported   = 1<<14,
+	EntityFlag_ByVal         = 1<<12,
+	EntityFlag_BitFieldValue = 1<<13,
+	EntityFlag_PolyConst     = 1<<14,
+	EntityFlag_NotExported   = 1<<15,
+	EntityFlag_ConstInput    = 1<<16,
 
-	EntityFlag_Static        = 1<<16,
+	EntityFlag_Static        = 1<<17,
 
-	EntityFlag_ImplicitReference = 1<<17, // NOTE(bill): equivalent to `const &` in C++
+	EntityFlag_ImplicitReference = 1<<18, // NOTE(bill): equivalent to `const &` in C++
 
 	EntityFlag_SoaPtrField   = 1<<19, // to allow s.x[0] where `s.x` is a pointer rather than a slice
 
@@ -62,7 +66,7 @@ enum EntityFlag {
 
 enum EntityState {
 	EntityState_Unresolved = 0,
-	EntityState_InProgress  = 1,
+	EntityState_InProgress = 1,
 	EntityState_Resolved   = 2,
 };
 
@@ -104,14 +108,20 @@ struct Entity {
 	Entity *    using_parent;
 	Ast *       using_expr;
 
+	lbModule *   code_gen_module;
+	lbProcedure *code_gen_procedure;
+
 	isize       order_in_src;
 	String      deprecated_message;
 
+	// IMPORTANT NOTE(bill): This must be a discriminated union because of patching
+	// later entity kinds
 	union {
 		struct {
 			ExactValue value;
 		} Constant;
 		struct {
+			Ast *init_expr; // only used for some variables within procedure bodies
 			i32        field_index;
 			i32        field_src_index;
 
@@ -350,3 +360,23 @@ Entity *alloc_entity_dummy_variable(Scope *scope, Token token) {
 	return alloc_entity_variable(scope, token, nullptr);
 }
 
+
+Entity *entity_from_expr(Ast *expr);
+
+Entity *strip_entity_wrapping(Entity *e) {
+	if (e == nullptr) {
+		return nullptr;
+	}
+	if (e->kind != Entity_Constant) {
+		return e;
+	}
+	if (e->Constant.value.kind == ExactValue_Procedure) {
+		return strip_entity_wrapping(e->Constant.value.value_procedure);
+	}
+	return e;
+}
+
+Entity *strip_entity_wrapping(Ast *expr) {
+	Entity *e = entity_from_expr(expr);
+	return strip_entity_wrapping(e);
+}

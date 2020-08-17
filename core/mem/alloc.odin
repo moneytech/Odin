@@ -10,6 +10,21 @@ Allocator_Mode :: enum byte {
 	Free,
 	Free_All,
 	Resize,
+	Query_Features,
+}
+*/
+
+Allocator_Mode_Set :: runtime.Allocator_Mode_Set;
+/*
+Allocator_Mode_Set :: distinct bit_set[Allocator_Mode];
+*/
+
+Allocator_Query_Info :: runtime.Allocator_Query_Info;
+/*
+Allocator_Query_Info :: struct {
+	pointer:   Maybe(rawptr),
+	size:      Maybe(int),
+	alignment: Maybe(int),
 }
 */
 
@@ -53,13 +68,32 @@ resize :: inline proc(ptr: rawptr, old_size, new_size: int, alignment: int = DEF
 		return nil;
 	}
 	if new_size == 0 {
-		free(ptr, allocator, loc);
+		if ptr != nil {
+			allocator.procedure(allocator.data, Allocator_Mode.Free, 0, 0, ptr, 0, 0, loc);
+		}
 		return nil;
 	} else if ptr == nil {
 		return allocator.procedure(allocator.data, Allocator_Mode.Alloc, new_size, alignment, nil, 0, 0, loc);
 	}
 	return allocator.procedure(allocator.data, Allocator_Mode.Resize, new_size, alignment, ptr, old_size, 0, loc);
 }
+
+query_features :: proc(allocator: Allocator, loc := #caller_location) -> (set: Allocator_Mode_Set) {
+	if allocator.procedure != nil {
+		allocator.procedure(allocator.data, Allocator_Mode.Query_Features, 0, 0, &set, 0, 0, loc);
+		return set;
+	}
+	return nil;
+}
+
+query_info :: proc(pointer: rawptr, allocator: Allocator, loc := #caller_location) -> (props: Allocator_Query_Info) {
+	props.pointer = pointer;
+	if allocator.procedure != nil {
+		allocator.procedure(allocator.data, Allocator_Mode.Query_Info, 0, 0, &props, 0, 0, loc);
+	}
+	return;
+}
+
 
 
 delete_string :: proc(str: string, allocator := context.allocator, loc := #caller_location) {
@@ -111,7 +145,10 @@ make_slice :: inline proc($T: typeid/[]$E, auto_cast len: int, allocator := cont
 make_aligned :: proc($T: typeid/[]$E, auto_cast len: int, alignment: int, allocator := context.allocator, loc := #caller_location) -> T {
 	runtime.make_slice_error_loc(loc, len);
 	data := alloc(size_of(E)*len, alignment, allocator, loc);
-	if data == nil do return nil;
+	if data == nil && size_of(E) != 0 {
+		return nil;
+	}
+	zero(data, size_of(E)*len);
 	s := Raw_Slice{data, len};
 	return transmute(T)s;
 }
@@ -125,9 +162,10 @@ make_dynamic_array_len_cap :: proc($T: typeid/[dynamic]$E, auto_cast len: int, a
 	runtime.make_dynamic_array_error_loc(loc, len, cap);
 	data := alloc(size_of(E)*cap, align_of(E), allocator, loc);
 	s := Raw_Dynamic_Array{data, len, cap, allocator};
-	if data == nil {
+	if data == nil && size_of(E) != 0 {
 		s.len, s.cap = 0, 0;
 	}
+	zero(data, size_of(E)*len);
 	return transmute(T)s;
 }
 make_map :: proc($T: typeid/map[$K]$E, auto_cast cap: int = 16, allocator := context.allocator, loc := #caller_location) -> T {
@@ -162,7 +200,7 @@ default_resize_align :: proc(old_memory: rawptr, old_size, new_size, alignment: 
 	new_memory := alloc(new_size, alignment, allocator, loc);
 	if new_memory == nil do return nil;
 
-	copy(new_memory, old_memory, min(old_size, new_size));;
+	copy(new_memory, old_memory, min(old_size, new_size));
 	free(old_memory, allocator, loc);
 	return new_memory;
 }

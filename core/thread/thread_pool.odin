@@ -70,6 +70,11 @@ pool_init :: proc(pool: ^Pool, thread_count: int, allocator := context.allocator
 
 pool_destroy :: proc(pool: ^Pool) {
 	delete(pool.tasks);
+
+	for thread in &pool.threads {
+		destroy(thread);
+	}
+
 	delete(pool.threads, pool.allocator);
 
 	sync.mutex_destroy(&pool.mutex);
@@ -111,9 +116,8 @@ pool_try_and_pop_task :: proc(pool: ^Pool) -> (task: Task, got_task: bool = fals
 	if sync.mutex_try_lock(&pool.mutex) {
 		if len(pool.tasks) != 0 {
 			intrinsics.atomic_add(&pool.processing_task_count, 1);
-			task = pool.tasks[0];
+			task = pop_front(&pool.tasks);
 			got_task = true;
-			ordered_remove(&pool.tasks, 0);
 		}
 		sync.mutex_unlock(&pool.mutex);
 	}

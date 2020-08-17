@@ -1,4 +1,3 @@
-bool check_is_terminating(Ast *node);
 void check_stmt          (CheckerContext *ctx, Ast *node, u32 flags);
 
 // NOTE(bill): 'content_name' is for debugging and error messages
@@ -38,6 +37,10 @@ Type *check_init_variable(CheckerContext *ctx, Entity *e, Operand *operand, Stri
 			e->type = t_invalid;
 		}
 		return nullptr;
+	}
+
+	if (e->kind == Entity_Variable) {
+		e->Variable.init_expr = operand->expr;
 	}
 
 	if (operand->mode == Addressing_Type) {
@@ -256,9 +259,6 @@ void check_type_decl(CheckerContext *ctx, Entity *e, Ast *init_expr, Type *def) 
 	GB_ASSERT(e->type == nullptr);
 
 	DeclInfo *decl = decl_info_of_entity(e);
-	if (decl != nullptr) {
-		check_decl_attributes(ctx, decl->attributes, const_decl_attribute, nullptr);
-	}
 
 	bool is_distinct = is_type_distinct(init_expr);
 	Ast *te = remove_type_alias_clutter(init_expr);
@@ -280,6 +280,10 @@ void check_type_decl(CheckerContext *ctx, Entity *e, Ast *init_expr, Type *def) 
 		error(init_expr, "'distinct' cannot be applied to 'typeid'");
 		is_distinct = false;
 	}
+	if (is_distinct && is_type_any(e->type)) {
+		error(init_expr, "'distinct' cannot be applied to 'any'");
+		is_distinct = false;
+	}
 	if (!is_distinct) {
 		e->type = bt;
 		named->Named.base = bt;
@@ -295,6 +299,23 @@ void check_type_decl(CheckerContext *ctx, Entity *e, Ast *init_expr, Type *def) 
 			operand.type = e->type;
 			operand.expr = init_expr;
 			check_assignment(ctx, &operand, t, str_lit("constant declaration"));
+		}
+	}
+
+	if (decl != nullptr) {
+		AttributeContext ac = {};
+		check_decl_attributes(ctx, decl->attributes, type_decl_attribute, &ac);
+		if (ac.atom_op_table != nullptr) {
+			Type *bt = base_type(e->type);
+			switch (bt->kind) {
+			case Type_Struct:
+				bt->Struct.atom_op_table = ac.atom_op_table;
+				break;
+			default:
+				error(e->token, "Only struct types can have custom atom operations");
+				gb_free(heap_allocator(), ac.atom_op_table);
+				break;
+			}
 		}
 	}
 
@@ -335,6 +356,9 @@ void override_entity_in_scope(Entity *original_entity, Entity *new_entity) {
 	Scope *found_scope = nullptr;
 	Entity *found_entity = nullptr;
 	scope_lookup_parent(original_entity->scope, original_name, &found_scope, &found_entity);
+	if (found_scope == nullptr) {
+		return;
+	}
 
 	// IMPORTANT TODO(bill)
 	// Date: 2018-09-29
@@ -346,7 +370,7 @@ void override_entity_in_scope(Entity *original_entity, Entity *new_entity) {
 
 	// GB_ASSERT_MSG(found_entity == original_entity, "%.*s == %.*s", LIT(found_entity->token.string), LIT(new_entity->token.string));
 
-	map_set(&found_scope->elements, hash_string(original_name), new_entity);
+	string_map_set(&found_scope->elements, original_name, new_entity);
 }
 
 
@@ -411,7 +435,11 @@ void check_const_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, Ast *init,
 		case Addressing_ProcGroup:
 			GB_ASSERT(operand.proc_group != nullptr);
 			GB_ASSERT(operand.proc_group->kind == Entity_ProcGroup);
-			override_entity_in_scope(e, operand.proc_group);
+			// NOTE(bill, 2020-06-10): It is better to just clone the contents than overriding the entity in the scope
+			// Thank goodness I made entities a tagged union to allow for this implace patching
+			// override_entity_in_scope(e, operand.proc_group);
+			e->kind = Entity_ProcGroup;
+			e->ProcGroup.entities = array_clone(heap_allocator(), operand.proc_group->ProcGroup.entities);
 			return;
 		}
 
@@ -477,9 +505,13 @@ void check_const_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, Ast *init,
 
 typedef bool TypeCheckSig(Type *t);
 bool sig_compare(TypeCheckSig *a, Type *x, Type *y) {
+	x = core_type(x);
+	y = core_type(y);
 	return (a(x) && a(y));
 }
 bool sig_compare(TypeCheckSig *a, TypeCheckSig *b, Type *x, Type *y) {
+	x = core_type(x);
+	y = core_type(y);
 	if (a == b) {
 		return sig_compare(a, x, y);
 	}
@@ -492,16 +524,16 @@ bool signature_parameter_similar_enough(Type *x, Type *y) {
 	}
 
 	if (sig_compare(is_type_integer, x, y)) {
-		GB_ASSERT(x->kind == Type_Basic);
-		GB_ASSERT(y->kind == Type_Basic);
+		GB_ASSERT(core_type(x)->kind == Type_Basic);
+		GB_ASSERT(core_type(y)->kind == Type_Basic);
 		i64 sx = type_size_of(x);
 		i64 sy = type_size_of(y);
 		if (sx == sy) return true;
 	}
 
 	if (sig_compare(is_type_integer, is_type_boolean, x, y)) {
-		GB_ASSERT(x->kind == Type_Basic);
-		GB_ASSERT(y->kind == Type_Basic);
+		GB_ASSERT(core_type(x)->kind == Type_Basic);
+		GB_ASSERT(core_type(y)->kind == Type_Basic);
 		i64 sx = type_size_of(x);
 		i64 sy = type_size_of(y);
 		if (sx == sy) return true;
@@ -511,6 +543,13 @@ bool signature_parameter_similar_enough(Type *x, Type *y) {
 	}
 
 	if (sig_compare(is_type_uintptr, is_type_rawptr, x, y)) {
+		return true;
+	}
+
+	if (sig_compare(is_type_proc, is_type_proc, x, y)) {
+		return true;
+	}
+	if (sig_compare(is_type_proc, is_type_pointer, x, y)) {
 		return true;
 	}
 
@@ -625,6 +664,7 @@ void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 
 	check_open_scope(ctx, pl->type);
 	defer (check_close_scope(ctx));
+	ctx->scope->procedure_entity = e;
 
 	Type *decl_type = nullptr;
 
@@ -773,8 +813,8 @@ void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		init_entity_foreign_library(ctx, e);
 
 		auto *fp = &ctx->info->foreigns;
-		HashKey key = hash_string(name);
-		Entity **found = map_get(fp, key);
+		StringHashKey key = string_hash_string(name);
+		Entity **found = string_map_get(fp, key);
 		if (found) {
 			Entity *f = *found;
 			TokenPos pos = f->token.pos;
@@ -796,7 +836,7 @@ void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		} else if (name == "main") {
 			error(d->proc_lit, "The link name 'main' is reserved for internal use");
 		} else {
-			map_set(fp, key, e);
+			string_map_set(fp, key, e);
 		}
 	} else {
 		String name = e->token.string;
@@ -805,8 +845,8 @@ void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		}
 		if (e->Procedure.link_name.len > 0 || is_export) {
 			auto *fp = &ctx->info->foreigns;
-			HashKey key = hash_string(name);
-			Entity **found = map_get(fp, key);
+			StringHashKey key = string_hash_string(name);
+			Entity **found = string_map_get(fp, key);
 			if (found) {
 				Entity *f = *found;
 				TokenPos pos = f->token.pos;
@@ -818,7 +858,7 @@ void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 			} else if (name == "main") {
 				error(d->proc_lit, "The link name 'main' is reserved for internal use");
 			} else {
-				map_set(fp, key, e);
+				string_map_set(fp, key, e);
 			}
 		}
 	}
@@ -842,6 +882,11 @@ void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, 
 	if (decl != nullptr) {
 		check_decl_attributes(ctx, decl->attributes, var_decl_attribute, &ac);
 	}
+
+	if (ac.require_declaration) {
+		array_add(&ctx->info->required_global_variables, e);
+	}
+
 
 	e->Variable.thread_local_model = ac.thread_local_model;
 	e->Variable.is_export = ac.is_export;
@@ -889,8 +934,8 @@ void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, 
 		}
 
 		auto *fp = &ctx->info->foreigns;
-		HashKey key = hash_string(name);
-		Entity **found = map_get(fp, key);
+		StringHashKey key = string_hash_string(name);
+		Entity **found = string_map_get(fp, key);
 		if (found) {
 			Entity *f = *found;
 			TokenPos pos = f->token.pos;
@@ -903,7 +948,7 @@ void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast *type_expr, 
 				      LIT(name), LIT(pos.file), pos.line, pos.column);
 			}
 		} else {
-			map_set(fp, key, e);
+			string_map_set(fp, key, e);
 		}
 	}
 
@@ -1143,11 +1188,14 @@ void check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *decl, Type *ty
 	CheckerContext new_ctx = *ctx_;
 	CheckerContext *ctx = &new_ctx;
 
+	GB_ASSERT(type->kind == Type_Proc);
+
 	ctx->scope = decl->scope;
 	ctx->decl = decl;
 	ctx->proc_name = proc_name;
 	ctx->curr_proc_decl = decl;
 	ctx->curr_proc_sig  = type;
+	ctx->curr_proc_calling_convention = type->Proc.calling_convention;
 
 	ast_node(bs, BlockStmt, body);
 
@@ -1156,7 +1204,6 @@ void check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *decl, Type *ty
 	defer (array_free(&using_entities));
 
 	{
-		GB_ASSERT(type->kind == Type_Proc);
 		if (type->Proc.param_count > 0) {
 			TypeTuple *params = &type->Proc.params->Tuple;
 			for_array(i, params->variables) {
@@ -1184,7 +1231,6 @@ void check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *decl, Type *ty
 
 							ProcUsingVar puv = {e, uvar};
 							array_add(&using_entities, puv);
-
 						}
 					}
 				} else {
@@ -1207,7 +1253,7 @@ void check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *decl, Type *ty
 	}
 
 
-	bool where_clause_ok = evaluate_where_clauses(ctx, decl->scope, &decl->proc_lit->ProcLit.where_clauses, true);
+	bool where_clause_ok = evaluate_where_clauses(ctx, nullptr, decl->scope, &decl->proc_lit->ProcLit.where_clauses, !decl->where_clauses_evaluated);
 	if (!where_clause_ok) {
 		// NOTE(bill, 2019-08-31): Don't check the body as the where clauses failed
 		return;
@@ -1225,7 +1271,7 @@ void check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *decl, Type *ty
 		check_stmt_list(ctx, bs->stmts, Stmt_CheckScopeDecls);
 
 		if (type->Proc.result_count > 0) {
-			if (!check_is_terminating(body)) {
+			if (!check_is_terminating(body, str_lit(""))) {
 				if (token.kind == Token_Ident) {
 					error(bs->close, "Missing return statement at the end of the procedure '%.*s'", LIT(token.string));
 				} else {

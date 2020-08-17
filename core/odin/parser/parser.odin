@@ -214,17 +214,17 @@ consume_comment_group :: proc(p: ^Parser, n: int) -> (comments: ^ast.Comment_Gro
 	for p.curr_tok.kind == .Comment &&
 	    p.curr_tok.pos.line <= end_line+n {
 	    comment: tokenizer.Token;
-    	comment, end_line = consume_comment(p);
+		comment, end_line = consume_comment(p);
 		append(&list, comment);
-    }
+	}
 
-    if len(list) > 0 {
-    	comments = new(ast.Comment_Group);
-    	comments.list = list[:];
-    	append(&p.file.comments, comments);
-    }
+	if len(list) > 0 {
+		comments = new(ast.Comment_Group);
+		comments.list = list[:];
+		append(&p.file.comments, comments);
+	}
 
-    return;
+	return;
 }
 
 consume_comment_groups :: proc(p: ^Parser, prev: tokenizer.Token) {
@@ -1028,7 +1028,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		if tok.kind != .Fallthrough && p.curr_tok.kind == .Ident {
 			label = parse_ident(p);
 		}
-		end := label != nil ? label.end : end_pos(tok);
+		end := label.end if label != nil else end_pos(tok);
 		s := ast.new(ast.Branch_Stmt, tok.pos, end);
 		expect_semicolon(p, s);
 		return s;
@@ -1132,6 +1132,8 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 token_precedence :: proc(p: ^Parser, kind: tokenizer.Token_Kind) -> int {
 	#partial switch kind {
 	case .Question:
+	case .If:
+	case .When:
 		return 1;
 	case .Ellipsis, .Range_Half:
 		if !p.allow_range {
@@ -1215,6 +1217,7 @@ convert_stmt_to_body :: proc(p: ^Parser, stmt: ^ast.Stmt) -> ^ast.Stmt {
 	bs.stmts = make([]^ast.Stmt, 1);
 	bs.stmts[0] = stmt;
 	bs.close = stmt.end;
+	bs.uses_do = true;
 	return bs;
 }
 
@@ -1911,7 +1914,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			bd.tok  = tok;
 			bd.name = name.text;
 			return bd;
-		case "location", "load", "assert", "defined":
+		case "location", "load", "assert", "defined", "config":
 			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name));
 			bd.tok  = tok;
 			bd.name = name.text;
@@ -2221,6 +2224,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		tok := expect_token(p, .Union);
 		poly_params: ^ast.Field_List;
 		align:       ^ast.Expr;
+		is_maybe:    bool;
 
 		if allow_token(p, .Open_Paren) {
 			param_count: int;
@@ -2241,6 +2245,9 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case "align":
 				if align != nil do error(p, tag.pos, "duplicate union tag '#%s'", tag.text);
 				align = parse_expr(p, true);
+			case "maybe":
+				if is_maybe do error(p, tag.pos, "duplicate union tag '#%s'", tag.text);
+				is_maybe = true;
 			case:
 				error(p, tag.pos, "invalid union tag '#%s", tag.text);
 			}
@@ -2279,6 +2286,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		ut.align         = align;
 		ut.where_token   = where_token;
 		ut.where_clauses = where_clauses;
+		ut.is_maybe      = is_maybe;
 
 		return ut;
 
@@ -2453,7 +2461,7 @@ parse_literal_value :: proc(p: ^Parser, type: ^ast.Expr) -> ^ast.Comp_Lit {
 
 	close := expect_token_after(p, .Close_Brace, "compound literal");
 
-	pos := type != nil ? type.pos : open.pos;
+	pos := type.pos if type != nil else open.pos;
 	lit := ast.new(ast.Comp_Lit, pos, end_pos(close));
 	lit.type  = type;
 	lit.open  = open.pos;
@@ -2714,6 +2722,13 @@ parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
 			if op_prec != prec {
 				break;
 			}
+			if op.kind == .If || op.kind == .When {
+				if p.prev_tok.pos.line < op.pos.line {
+					// NOTE(bill): Check to see if the `if` or `when` is on the same line of the `lhs` condition
+					break;
+				}
+			}
+
 			expect_operator(p);
 
 			if op.kind == .Question {
@@ -2726,6 +2741,32 @@ parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
 				te.op1  = op;
 				te.x    = x;
 				te.op2  = colon;
+				te.y    = y;
+
+				expr = te;
+			} else if op.kind == .If {
+				x := expr;
+				cond := parse_expr(p, lhs);
+				else_tok := expect_token(p, .Else);
+				y := parse_expr(p, lhs);
+				te := ast.new(ast.Ternary_If_Expr, expr.pos, end_pos(p.prev_tok));
+				te.x    = x;
+				te.op1  = op;
+				te.cond = cond;
+				te.op2  = else_tok;
+				te.y    = y;
+
+				expr = te;
+			} else if op.kind == .When {
+				x := expr;
+				cond := parse_expr(p, lhs);
+				else_tok := expect_token(p, .Else);
+				y := parse_expr(p, lhs);
+				te := ast.new(ast.Ternary_When_Expr, expr.pos, end_pos(p.prev_tok));
+				te.x    = x;
+				te.op1  = op;
+				te.cond = cond;
+				te.op2  = else_tok;
 				te.y    = y;
 
 				expr = te;

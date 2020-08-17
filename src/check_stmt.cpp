@@ -1,3 +1,20 @@
+bool is_divigering_stmt(Ast *stmt) {
+	if (stmt->kind != Ast_ExprStmt) {
+		return false;
+	}
+	Ast *expr = unparen_expr(stmt->ExprStmt.expr);
+	if (expr->kind != Ast_CallExpr) {
+		return false;
+	}
+	if (expr->CallExpr.proc->kind == Ast_BasicDirective) {
+		String name = expr->CallExpr.proc->BasicDirective.name;
+		return name == "panic";
+	}
+	Type *t = type_of_expr(expr->CallExpr.proc);
+	t = base_type(t);
+	return t->kind == Type_Proc && t->Proc.diverging;
+}
+
 void check_stmt_list(CheckerContext *ctx, Array<Ast *> const &stmts, u32 flags) {
 	if (stmts.count == 0) {
 		return;
@@ -17,6 +34,18 @@ void check_stmt_list(CheckerContext *ctx, Array<Ast *> const &stmts, u32 flags) 
 		}
 		max--;
 	}
+	isize max_non_constant_declaration = stmts.count;
+	for (isize i = stmts.count-1; i >= 0; i--) {
+		if (stmts[i]->kind == Ast_EmptyStmt) {
+			// Okay
+		} else if (stmts[i]->kind == Ast_ValueDecl && !stmts[i]->ValueDecl.is_mutable) {
+			// Okay
+		} else {
+			break;
+		}
+		max_non_constant_declaration--;
+	}
+
 	for (isize i = 0; i < max; i++) {
 		Ast *n = stmts[i];
 		if (n->kind == Ast_EmptyStmt) {
@@ -27,38 +56,50 @@ void check_stmt_list(CheckerContext *ctx, Array<Ast *> const &stmts, u32 flags) 
 			new_flags |= Stmt_FallthroughAllowed;
 		}
 
-		if (i+1 < max) {
+		check_stmt(ctx, n, new_flags);
+
+		if (i+1 < max_non_constant_declaration) {
 			switch (n->kind) {
 			case Ast_ReturnStmt:
-				error(n, "Statements after this 'return' are never execu");
+				error(n, "Statements after this 'return' are never executed");
 				break;
 
 			case Ast_BranchStmt:
 				error(n, "Statements after this '%.*s' are never executed", LIT(n->BranchStmt.token.string));
 				break;
+
+			case Ast_ExprStmt:
+				if (is_divigering_stmt(n)) {
+					error(n, "Statements after a diverging procedure call are never executed");
+				}
+				break;
 			}
 		}
-
-		check_stmt(ctx, n, new_flags);
 	}
 }
 
-bool check_is_terminating_list(Array<Ast *> const &stmts) {
+bool check_is_terminating_list(Array<Ast *> const &stmts, String const &label) {
 	// Iterate backwards
 	for (isize n = stmts.count-1; n >= 0; n--) {
 		Ast *stmt = stmts[n];
-		if (stmt->kind != Ast_EmptyStmt) {
-			return check_is_terminating(stmt);
+		if (stmt->kind == Ast_EmptyStmt) {
+			// Okay
+		} else if (stmt->kind == Ast_ValueDecl && !stmt->ValueDecl.is_mutable) {
+			// Okay
+		} else if (is_divigering_stmt(stmt)) {
+			return true;
+		} else {
+			return check_is_terminating(stmt, label);
 		}
 	}
 
 	return false;
 }
 
-bool check_has_break_list(Array<Ast *> const &stmts, bool implicit) {
+bool check_has_break_list(Array<Ast *> const &stmts, String const &label, bool implicit) {
 	for_array(i, stmts) {
 		Ast *stmt = stmts[i];
-		if (check_has_break(stmt, implicit)) {
+		if (check_has_break(stmt, label, implicit)) {
 			return true;
 		}
 	}
@@ -66,25 +107,56 @@ bool check_has_break_list(Array<Ast *> const &stmts, bool implicit) {
 }
 
 
-bool check_has_break(Ast *stmt, bool implicit) {
+bool check_has_break(Ast *stmt, String const &label, bool implicit) {
 	switch (stmt->kind) {
 	case Ast_BranchStmt:
 		if (stmt->BranchStmt.token.kind == Token_break) {
-			return implicit;
+			if (stmt->BranchStmt.label == nullptr) {
+				return implicit;
+			}
+			if (stmt->BranchStmt.label->kind == Ast_Ident &&
+			    stmt->BranchStmt.label->Ident.token.string == label) {
+				return true;
+			}
 		}
 		break;
+
 	case Ast_BlockStmt:
-		return check_has_break_list(stmt->BlockStmt.stmts, implicit);
+		return check_has_break_list(stmt->BlockStmt.stmts, label, implicit);
 
 	case Ast_IfStmt:
-		if (check_has_break(stmt->IfStmt.body, implicit) ||
-		    (stmt->IfStmt.else_stmt != nullptr && check_has_break(stmt->IfStmt.else_stmt, implicit))) {
+		if (check_has_break(stmt->IfStmt.body, label, implicit) ||
+		    (stmt->IfStmt.else_stmt != nullptr && check_has_break(stmt->IfStmt.else_stmt, label, implicit))) {
 			return true;
 		}
 		break;
 
 	case Ast_CaseClause:
-		return check_has_break_list(stmt->CaseClause.stmts, implicit);
+		return check_has_break_list(stmt->CaseClause.stmts, label, implicit);
+
+	case Ast_SwitchStmt:
+		if (label != "" && check_has_break(stmt->SwitchStmt.body, label, false)) {
+			return true;
+		}
+		break;
+
+	case Ast_TypeSwitchStmt:
+		if (label != "" && check_has_break(stmt->TypeSwitchStmt.body, label, false)) {
+			return true;
+		}
+		break;
+
+	case Ast_ForStmt:
+		if (label != "" && check_has_break(stmt->ForStmt.body, label, false)) {
+			return true;
+		}
+		break;
+
+	case Ast_RangeStmt:
+		if (label != "" && check_has_break(stmt->RangeStmt.body, label, false)) {
+			return true;
+		}
+		break;
 	}
 
 	return false;
@@ -94,41 +166,42 @@ bool check_has_break(Ast *stmt, bool implicit) {
 
 // NOTE(bill): The last expression has to be a 'return' statement
 // TODO(bill): This is a mild hack and should be probably handled properly
-bool check_is_terminating(Ast *node) {
+bool check_is_terminating(Ast *node, String const &label) {
 	switch (node->kind) {
 	case_ast_node(rs, ReturnStmt, node);
 		return true;
 	case_end;
 
 	case_ast_node(bs, BlockStmt, node);
-		return check_is_terminating_list(bs->stmts);
+		return check_is_terminating_list(bs->stmts, label);
 	case_end;
 
 	case_ast_node(es, ExprStmt, node);
-		return check_is_terminating(es->expr);
+		return check_is_terminating(unparen_expr(es->expr), label);
 	case_end;
 
 	case_ast_node(is, IfStmt, node);
 		if (is->else_stmt != nullptr) {
-			if (check_is_terminating(is->body) &&
-			    check_is_terminating(is->else_stmt)) {
+			if (check_is_terminating(is->body, label) &&
+			    check_is_terminating(is->else_stmt, label)) {
 			    return true;
 		    }
 		}
 	case_end;
 
 	case_ast_node(ws, WhenStmt, node);
+		// TODO(bill): Is this logic correct for when statements?
 		if (ws->else_stmt != nullptr) {
-			if (check_is_terminating(ws->body) &&
-			    check_is_terminating(ws->else_stmt)) {
+			if (check_is_terminating(ws->body, label) &&
+			    check_is_terminating(ws->else_stmt, label)) {
 			    return true;
 		    }
 		}
 	case_end;
 
 	case_ast_node(fs, ForStmt, node);
-		if (fs->cond == nullptr && !check_has_break(fs->body, true)) {
-			return check_is_terminating(fs->body);
+		if (fs->cond == nullptr && !check_has_break(fs->body, label, true)) {
+			return true;
 		}
 	case_end;
 
@@ -148,8 +221,8 @@ bool check_is_terminating(Ast *node) {
 			if (cc->list.count == 0) {
 				has_default = true;
 			}
-			if (!check_is_terminating_list(cc->stmts) ||
-			    check_has_break_list(cc->stmts, true)) {
+			if (!check_is_terminating_list(cc->stmts, label) ||
+			    check_has_break_list(cc->stmts, label, true)) {
 				return false;
 			}
 		}
@@ -164,8 +237,8 @@ bool check_is_terminating(Ast *node) {
 			if (cc->list.count == 0) {
 				has_default = true;
 			}
-			if (!check_is_terminating_list(cc->stmts) ||
-			    check_has_break_list(cc->stmts, true)) {
+			if (!check_is_terminating_list(cc->stmts, label) ||
+			    check_has_break_list(cc->stmts, label, true)) {
 				return false;
 			}
 		}
@@ -310,11 +383,15 @@ Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, Operand *rhs)
 			}
 		}
 
-		Entity *e = entity_of_ident(lhs->expr);
+		Entity *e = entity_of_node(lhs->expr);
 
 		gbString str = expr_to_string(lhs->expr);
 		if (e != nullptr && e->flags & EntityFlag_Param) {
-			error(lhs->expr, "Cannot assign to '%s' which is a procedure parameter", str);
+			if (e->flags & EntityFlag_Using) {
+				error(lhs->expr, "Cannot assign to '%s' which is from a 'using' procedure parameter", str);
+			} else {
+				error(lhs->expr, "Cannot assign to '%s' which is a procedure parameter", str);
+			}
 		} else {
 			error(lhs->expr, "Cannot assign to '%s'", str);
 		}
@@ -489,6 +566,7 @@ bool check_using_stmt_entity(CheckerContext *ctx, AstUsingStmt *us, Ast *expr, b
 	}
 
 	case Entity_Variable: {
+		bool is_ptr = is_type_pointer(e->type);
 		Type *t = base_type(type_deref(e->type));
 		if (t->kind == Type_Struct) {
 			// TODO(bill): Make it work for unions too
@@ -497,6 +575,8 @@ bool check_using_stmt_entity(CheckerContext *ctx, AstUsingStmt *us, Ast *expr, b
 				Entity *f = found->elements.entries[i].value;
 				if (f->kind == Entity_Variable) {
 					Entity *uvar = alloc_entity_using_variable(e, f->token, f->type, expr);
+					if (!is_ptr && e->flags & EntityFlag_Value) uvar->flags |= EntityFlag_Value;
+					if (e->flags & EntityFlag_Param) uvar->flags |= EntityFlag_Param;
 					Entity *prev = scope_insert(ctx->scope, uvar);
 					if (prev != nullptr) {
 						gbString expr_str = expr_to_string(expr);
@@ -1003,7 +1083,7 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 	ast_node(ss, TypeSwitchStmt, node);
 	Operand x = {};
 
-	mod_flags |= Stmt_BreakAllowed;
+	mod_flags |= Stmt_BreakAllowed | Stmt_TypeSwitch;
 	check_open_scope(ctx, node);
 	defer (check_close_scope(ctx));
 
@@ -1102,6 +1182,12 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 			if (type_expr != nullptr) { // Otherwise it's a default expression
 				Operand y = {};
 				check_expr_or_type(ctx, &y, type_expr);
+				if (y.mode != Addressing_Type) {
+					gbString str = expr_to_string(type_expr);
+					error(type_expr, "Expected a type as a case, got %s", str);
+					gb_string_free(str);
+					continue;
+				}
 
 				if (switch_kind == TypeSwitch_Union) {
 					GB_ASSERT(is_type_union(bt));
@@ -1143,10 +1229,12 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 			}
 		}
 
+		bool is_reference = false;
+
 		if (is_ptr &&
 		    cc->list.count == 1 &&
 		    case_type != nullptr) {
-			case_type = alloc_type_pointer(case_type);
+			is_reference = true;
 		}
 
 		if (cc->list.count > 1) {
@@ -1161,7 +1249,9 @@ void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 		{
 			Entity *tag_var = alloc_entity_variable(ctx->scope, lhs->Ident.token, case_type, EntityState_Resolved);
 			tag_var->flags |= EntityFlag_Used;
-			tag_var->flags |= EntityFlag_Value;
+			if (!is_reference) {
+				tag_var->flags |= EntityFlag_Value;
+			}
 			add_entity(ctx->checker, ctx->scope, lhs, tag_var);
 			add_entity_use(ctx, lhs, tag_var);
 			add_implicit_entity(ctx, stmt, tag_var);
@@ -1240,6 +1330,18 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					}
 				}
 				return;
+			} else if (operand.expr->kind == Ast_SelectorCallExpr) {
+				AstSelectorCallExpr *se = &operand.expr->SelectorCallExpr;
+				ast_node(ce, CallExpr, se->call);
+				Type *t = type_of_expr(ce->proc);
+				if (is_type_proc(t)) {
+					if (t->Proc.require_results) {
+						gbString expr_str = expr_to_string(ce->proc);
+						error(node, "'%s' requires that its results must be handled", expr_str);
+						gb_string_free(expr_str);
+					}
+				}
+				return;
 			}
 			gbString expr_str = expr_to_string(operand.expr);
 			error(node, "Expression is not used: '%s'", expr_str);
@@ -1257,6 +1359,11 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 	case_end;
 
 	case_ast_node(as, AssignStmt, node);
+		if (ctx->curr_proc_calling_convention == ProcCC_Pure) {
+			error(node, "Assignment statements are not allowed within a \"pure\" procedure");
+			// Continue
+		}
+
 		switch (as->op.kind) {
 		case Token_Eq: {
 			// a, b, c = 1, 2, 3;  // Multisided
@@ -1280,9 +1387,11 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					o->expr = as->lhs[i];
 					o->mode = Addressing_Value;
 				} else {
+					ctx->assignment_lhs_hint = unparen_expr(as->lhs[i]);
 					check_expr(ctx, &lhs_operands[i], as->lhs[i]);
 				}
 			}
+			ctx->assignment_lhs_hint = nullptr; // Reset the assignment_lhs_hint
 
 			check_assignment_arguments(ctx, lhs_operands, &rhs_operands, as->rhs);
 
@@ -1294,8 +1403,61 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 				}
 			}
 
+			auto lhs_to_ignore = array_make<bool>(ctx->allocator, lhs_count);
+			defer (array_free(&lhs_to_ignore));
+
 			isize max = gb_min(lhs_count, rhs_count);
+			// NOTE(bill, 2020-05-02): This is an utter hack to get these custom atom operations working
+			// correctly for assignments
 			for (isize i = 0; i < max; i++) {
+				if (lhs_operands[i].mode == Addressing_AtomOpAssign) {
+					Operand lhs = lhs_operands[i];
+
+					Type *t = base_type(lhs.type);
+					GB_ASSERT(t->kind == Type_Struct);
+					ast_node(ie, IndexExpr, unparen_expr(lhs.expr));
+
+					TypeAtomOpTable *atom_op_table = t->Struct.atom_op_table;
+					GB_ASSERT(atom_op_table->op[TypeAtomOp_index_set] != nullptr);
+					Entity *e = atom_op_table->op[TypeAtomOp_index_set];
+
+					GB_ASSERT(e->identifier != nullptr);
+					Ast *proc_ident = clone_ast(e->identifier);
+					GB_ASSERT(ctx->file != nullptr);
+
+
+					TypeAndValue tv = type_and_value_of_expr(ie->expr);
+					Ast *expr = ie->expr;
+					if (is_type_pointer(tv.type)) {
+						// Okay
+					} else if (tv.mode == Addressing_Variable) {
+						// NOTE(bill): Hack it to take the address instead
+						expr = ast_unary_expr(ctx->file, {Token_And, STR_LIT("&")}, ie->expr);
+					} else {
+						continue;
+					}
+
+					auto args = array_make<Ast *>(heap_allocator(), 3);
+					args[0] = expr;
+					args[1] = ie->index;
+					args[2] = rhs_operands[i].expr;
+
+					Ast *fake_call = ast_call_expr(ctx->file, proc_ident, args, ie->open, ie->close, {});
+					Operand fake_operand = {};
+					fake_operand.expr = lhs.expr;
+					check_expr_base(ctx, &fake_operand, fake_call, nullptr);
+					AtomOpMapEntry entry = {TypeAtomOp_index_set, fake_call};
+					map_set(&ctx->info->atom_op_map, hash_pointer(lhs.expr), entry);
+
+					lhs_to_ignore[i] = true;
+
+				}
+			}
+
+			for (isize i = 0; i < max; i++) {
+				if (lhs_to_ignore[i]) {
+					continue;
+				}
 				check_assignment_variable(ctx, &lhs_operands[i], &rhs_operands[i]);
 			}
 			if (lhs_count != rhs_count) {
@@ -1468,6 +1630,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 		Entity *entities[2] = {};
 		isize entity_count = 0;
 		bool is_map = false;
+		bool use_by_reference_for_value = false;
 
 		Ast *expr = unparen_expr(rs->expr);
 
@@ -1513,26 +1676,31 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					break;
 
 				case Type_EnumeratedArray:
+					if (is_ptr) use_by_reference_for_value = true;
 					val0 = t->EnumeratedArray.elem;
 					val1 = t->EnumeratedArray.index;
 					break;
 
 				case Type_Array:
+					if (is_ptr) use_by_reference_for_value = true;
 					val0 = t->Array.elem;
 					val1 = t_int;
 					break;
 
 				case Type_DynamicArray:
+					if (is_ptr) use_by_reference_for_value = true;
 					val0 = t->DynamicArray.elem;
 					val1 = t_int;
 					break;
 
 				case Type_Slice:
+					if (is_ptr) use_by_reference_for_value = true;
 					val0 = t->Slice.elem;
 					val1 = t_int;
 					break;
 
 				case Type_Map:
+					if (is_ptr) use_by_reference_for_value = true;
 					is_map = true;
 					val0 = t->Map.key;
 					val1 = t->Map.value;
@@ -1612,6 +1780,14 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 				if (found == nullptr) {
 					entity = alloc_entity_variable(ctx->scope, token, type, EntityState_Resolved);
 					entity->flags |= EntityFlag_Value;
+					if (use_by_reference_for_value) {
+						if (i == 0 && !is_map) {
+							entity->flags &= ~EntityFlag_Value;
+						} else if (i == 1 && is_map) {
+							entity->flags &= ~EntityFlag_Value;
+						}
+					}
+
 					add_entity_definition(&ctx->checker->info, name, entity);
 				} else {
 					TokenPos pos = found->token.pos;
@@ -1680,17 +1856,21 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 		switch (token.kind) {
 		case Token_break:
 			if ((flags & Stmt_BreakAllowed) == 0 && bs->label == nullptr) {
-				error(token, "'break' only allowed in loops or 'switch' statements");
+				error(token, "'break' only allowed in non-inline loops or 'switch' statements");
 			}
 			break;
 		case Token_continue:
 			if ((flags & Stmt_ContinueAllowed) == 0 && bs->label == nullptr) {
-				error(token, "'continue' only allowed in loops");
+				error(token, "'continue' only allowed in non-inline loops");
 			}
 			break;
 		case Token_fallthrough:
 			if ((flags & Stmt_FallthroughAllowed) == 0) {
-				error(token, "'fallthrough' statement in illegal position, expected at the end of a 'case' block");
+				if ((flags & Stmt_TypeSwitch) != 0) {
+					error(token, "'fallthrough' statement not allowed within a type switch statement");
+				} else {
+					error(token, "'fallthrough' statement in illegal position, expected at the end of a 'case' block");
+				}
 			} else if (bs->label != nullptr) {
 				error(token, "'fallthrough' cannot have a label");
 			}
@@ -1910,6 +2090,12 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 			check_arity_match(ctx, vd);
 			check_init_variables(ctx, entities, entity_count, vd->values, str_lit("variable declaration"));
 
+			if (ctx->curr_proc_calling_convention == ProcCC_Pure) {
+				if (vd->values.count == 0) {
+					error(node, "Variable declarations without assignment are not allowed within \"pure\" procedures");
+				}
+			}
+
 			for (isize i = 0; i < entity_count; i++) {
 				Entity *e = entities[i];
 
@@ -1929,8 +2115,8 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 					init_entity_foreign_library(ctx, e);
 
 					auto *fp = &ctx->checker->info.foreigns;
-					HashKey key = hash_string(name);
-					Entity **found = map_get(fp, key);
+					StringHashKey key = string_hash_string(name);
+					Entity **found = string_map_get(fp, key);
 					if (found) {
 						Entity *f = *found;
 						TokenPos pos = f->token.pos;
@@ -1943,7 +2129,7 @@ void check_stmt_internal(CheckerContext *ctx, Ast *node, u32 flags) {
 							      LIT(name), LIT(pos.file), pos.line, pos.column);
 						}
 					} else {
-						map_set(fp, key, e);
+						string_map_set(fp, key, e);
 					}
 				} else if (e->flags & EntityFlag_Static) {
 					if (vd->values.count > 0) {

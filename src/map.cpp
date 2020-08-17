@@ -13,89 +13,42 @@ struct MapFindResult {
 	isize entry_index;
 };
 
-enum HashKeyKind {
-	HashKey_Default,
-	HashKey_String,
-	HashKey_Ptr,
-	HashKey_PtrAndId,
-};
-
-struct PtrAndId {
-	void *ptr;
-	u64   id;
-};
 
 struct HashKey {
-	HashKeyKind kind;
-	// u128        key;
-	u64         key;
-	union {
-		String   string; // if String, s.len > 0
-		void *   ptr;
-		PtrAndId ptr_and_id;
-	};
+	u64 key;
 };
+GB_STATIC_ASSERT(gb_size_of(u64) >= gb_size_of(void *));
 
 gb_inline HashKey hashing_proc(void const *data, isize len) {
-	HashKey h = {HashKey_Default};
-	h.kind = HashKey_Default;
+	HashKey h = {};
 	// h.key = u128_from_u64(gb_fnv64a(data, len));
 	h.key = gb_fnv64a(data, len);
 
 	return h;
 }
 
-gb_inline HashKey hash_string(String s) {
-	HashKey h = hashing_proc(s.text, s.len);
-	h.kind = HashKey_String;
-	h.string = s;
+gb_inline HashKey hash_pointer(void const *ptr) {
+	HashKey h = {};
+	h.key = cast(u64)cast(uintptr)ptr;
 	return h;
 }
 
-gb_inline HashKey hash_pointer(void *ptr) {
-	HashKey h = {HashKey_Ptr};
-	h.key = cast(u64)cast(uintptr)ptr;
-	h.ptr = ptr;
-	return h;
-}
-gb_inline HashKey hash_ptr_and_id(void *ptr, u64 id) {
-	HashKey h = {HashKey_PtrAndId};
-	h.key = cast(u64)cast(uintptr)ptr;
-	h.ptr_and_id.ptr = ptr;
-	h.ptr_and_id.id  = id;
-	return h;
-}
 gb_inline HashKey hash_integer(u64 u) {
-	HashKey h = {HashKey_Default};
+	HashKey h = {};
 	h.key = u;
 	return h;
 }
 gb_inline HashKey hash_f64(f64 f) {
-	HashKey h = {HashKey_Default};
+	HashKey h = {};
 	h.key = bit_cast<u64>(f);
 	return h;
 }
 
-bool hash_key_equal(HashKey a, HashKey b) {
-	if (a.key == b.key) {
-		// NOTE(bill): If two string's hashes collide, compare the strings themselves
-		if (a.kind == HashKey_String) {
-			if (b.kind == HashKey_String) {
-				return a.string == b.string;
-			}
-			return false;
-		} else if (a.kind == HashKey_PtrAndId) {
-			if (b.kind == HashKey_PtrAndId) {
-				return a.ptr_and_id.id == b.ptr_and_id.id;
-			}
-			return false;
-		}
-		return true;
-	}
-	return false;
+gb_inline bool hash_key_equal(HashKey a, HashKey b) {
+	return a.key == b.key;
 }
-bool operator==(HashKey a, HashKey b) { return hash_key_equal(a, b); }
-bool operator!=(HashKey a, HashKey b) { return !hash_key_equal(a, b); }
+gb_inline bool operator==(HashKey a, HashKey b) { return hash_key_equal(a, b); }
+gb_inline bool operator!=(HashKey a, HashKey b) { return !hash_key_equal(a, b); }
 
 #endif
 
@@ -115,29 +68,32 @@ struct Map {
 
 template <typename T> void map_init             (Map<T> *h, gbAllocator a, isize capacity = 16);
 template <typename T> void map_destroy          (Map<T> *h);
-template <typename T> T *  map_get              (Map<T> *h, HashKey key);
-template <typename T> void map_set              (Map<T> *h, HashKey key, T const &value);
-template <typename T> void map_remove           (Map<T> *h, HashKey key);
+template <typename T> T *  map_get              (Map<T> *h, HashKey const &key);
+template <typename T> void map_set              (Map<T> *h, HashKey const &key, T const &value);
+template <typename T> void map_remove           (Map<T> *h, HashKey const &key);
 template <typename T> void map_clear            (Map<T> *h);
 template <typename T> void map_grow             (Map<T> *h);
 template <typename T> void map_rehash           (Map<T> *h, isize new_count);
 
 #if MAP_ENABLE_MULTI_MAP
 // Mutlivalued map procedure
-template <typename T> MapEntry<T> * multi_map_find_first(Map<T> *h, HashKey key);
+template <typename T> MapEntry<T> * multi_map_find_first(Map<T> *h, HashKey const &key);
 template <typename T> MapEntry<T> * multi_map_find_next (Map<T> *h, MapEntry<T> *e);
 
-template <typename T> isize multi_map_count     (Map<T> *h, HashKey key);
-template <typename T> void  multi_map_get_all   (Map<T> *h, HashKey key, T *items);
-template <typename T> void  multi_map_insert    (Map<T> *h, HashKey key, T const &value);
-template <typename T> void  multi_map_remove    (Map<T> *h, HashKey key, MapEntry<T> *e);
-template <typename T> void  multi_map_remove_all(Map<T> *h, HashKey key);
+template <typename T> isize multi_map_count     (Map<T> *h, HashKey const &key);
+template <typename T> void  multi_map_get_all   (Map<T> *h, HashKey const &key, T *items);
+template <typename T> void  multi_map_insert    (Map<T> *h, HashKey const &key, T const &value);
+template <typename T> void  multi_map_remove    (Map<T> *h, HashKey const &key, MapEntry<T> *e);
+template <typename T> void  multi_map_remove_all(Map<T> *h, HashKey const &key);
 #endif
 
 template <typename T>
 gb_inline void map_init(Map<T> *h, gbAllocator a, isize capacity) {
-	array_init(&h->hashes,  a, 0, capacity);
+	array_init(&h->hashes,  a, capacity);
 	array_init(&h->entries, a, 0, capacity);
+	for (isize i = 0; i < capacity; i++) {
+		h->hashes.data[i] = -1;
+	}
 }
 
 template <typename T>
@@ -147,7 +103,7 @@ gb_inline void map_destroy(Map<T> *h) {
 }
 
 template <typename T>
-gb_internal isize map__add_entry(Map<T> *h, HashKey key) {
+gb_internal isize map__add_entry(Map<T> *h, HashKey const &key) {
 	MapEntry<T> e = {};
 	e.key = key;
 	e.next = -1;
@@ -156,7 +112,7 @@ gb_internal isize map__add_entry(Map<T> *h, HashKey key) {
 }
 
 template <typename T>
-gb_internal MapFindResult map__find(Map<T> *h, HashKey key) {
+gb_internal MapFindResult map__find(Map<T> *h, HashKey const &key) {
 	MapFindResult fr = {-1, -1, -1};
 	if (h->hashes.count > 0) {
 		// fr.hash_index  = u128_to_i64(key.key % u128_from_i64(h->hashes.count));
@@ -208,7 +164,7 @@ template <typename T>
 void map_rehash(Map<T> *h, isize new_count) {
 	isize i, j;
 	Map<T> nh = {};
-	map_init(&nh, h->hashes.allocator);
+	map_init(&nh, h->hashes.allocator, new_count);
 	array_resize(&nh.hashes, new_count);
 	array_reserve(&nh.entries, h->entries.count);
 	for (i = 0; i < new_count; i++) {
@@ -238,7 +194,7 @@ void map_rehash(Map<T> *h, isize new_count) {
 }
 
 template <typename T>
-gb_inline T *map_get(Map<T> *h, HashKey key) {
+T *map_get(Map<T> *h, HashKey const &key) {
 	isize index = map__find(h, key).entry_index;
 	if (index >= 0) {
 		return &h->entries[index].value;
@@ -247,7 +203,7 @@ gb_inline T *map_get(Map<T> *h, HashKey key) {
 }
 
 template <typename T>
-void map_set(Map<T> *h, HashKey key, T const &value) {
+void map_set(Map<T> *h, HashKey const &key, T const &value) {
 	isize index;
 	MapFindResult fr;
 	if (h->hashes.count == 0) {
@@ -273,7 +229,7 @@ void map_set(Map<T> *h, HashKey key, T const &value) {
 
 
 template <typename T>
-void map__erase(Map<T> *h, MapFindResult fr) {
+void map__erase(Map<T> *h, MapFindResult const &fr) {
 	MapFindResult last;
 	if (fr.entry_prev < 0) {
 		h->hashes[fr.hash_index] = h->entries[fr.entry_index].next;
@@ -294,7 +250,7 @@ void map__erase(Map<T> *h, MapFindResult fr) {
 }
 
 template <typename T>
-void map_remove(Map<T> *h, HashKey key) {
+void map_remove(Map<T> *h, HashKey const &key) {
 	MapFindResult fr = map__find(h, key);
 	if (fr.entry_index >= 0) {
 		map__erase(h, fr);
@@ -310,7 +266,7 @@ gb_inline void map_clear(Map<T> *h) {
 
 #if MAP_ENABLE_MULTI_MAP
 template <typename T>
-MapEntry<T> *multi_map_find_first(Map<T> *h, HashKey key) {
+MapEntry<T> *multi_map_find_first(Map<T> *h, HashKey const &key) {
 	isize i = map__find(h, key).entry_index;
 	if (i < 0) {
 		return nullptr;
@@ -331,7 +287,7 @@ MapEntry<T> *multi_map_find_next(Map<T> *h, MapEntry<T> *e) {
 }
 
 template <typename T>
-isize multi_map_count(Map<T> *h, HashKey key) {
+isize multi_map_count(Map<T> *h, HashKey const &key) {
 	isize count = 0;
 	MapEntry<T> *e = multi_map_find_first(h, key);
 	while (e != nullptr) {
@@ -342,7 +298,7 @@ isize multi_map_count(Map<T> *h, HashKey key) {
 }
 
 template <typename T>
-void multi_map_get_all(Map<T> *h, HashKey key, T *items) {
+void multi_map_get_all(Map<T> *h, HashKey const &key, T *items) {
 	isize i = 0;
 	MapEntry<T> *e = multi_map_find_first(h, key);
 	while (e != nullptr) {
@@ -352,7 +308,7 @@ void multi_map_get_all(Map<T> *h, HashKey key, T *items) {
 }
 
 template <typename T>
-void multi_map_insert(Map<T> *h, HashKey key, T const &value) {
+void multi_map_insert(Map<T> *h, HashKey const &key, T const &value) {
 	MapFindResult fr;
 	isize i;
 	if (h->hashes.count == 0) {
@@ -375,7 +331,7 @@ void multi_map_insert(Map<T> *h, HashKey key, T const &value) {
 }
 
 template <typename T>
-void multi_map_remove(Map<T> *h, HashKey key, MapEntry<T> *e) {
+void multi_map_remove(Map<T> *h, HashKey const &key, MapEntry<T> *e) {
 	MapFindResult fr = map__find_from_entry(h, e);
 	if (fr.entry_index >= 0) {
 		map__erase(h, fr);
@@ -383,7 +339,7 @@ void multi_map_remove(Map<T> *h, HashKey key, MapEntry<T> *e) {
 }
 
 template <typename T>
-void multi_map_remove_all(Map<T> *h, HashKey key) {
+void multi_map_remove_all(Map<T> *h, HashKey const &key) {
 	while (map_get(h, key) != nullptr) {
 		map_remove(h, key);
 	}

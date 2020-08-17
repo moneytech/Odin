@@ -103,6 +103,8 @@ foreign user32 {
 	@(link_name="PostQuitMessage")  post_quit_message   :: proc(exit_code: i32) ---;
 	@(link_name="SetWindowTextA")   set_window_text_a   :: proc(hwnd: Hwnd, c_string: cstring) -> Bool ---;
 	@(link_name="SetWindowTextW")   set_window_text_w   :: proc(hwnd: Hwnd, c_string: Wstring) -> Bool ---;
+	@(link_name="RegisterClassA")   register_class_a    :: proc(wc: ^Wnd_Class_A) -> i16 ---;
+	@(link_name="RegisterClassW")   register_class_w    :: proc(wc: ^Wnd_Class_W) -> i16 ---;
 	@(link_name="RegisterClassExA") register_class_ex_a :: proc(wc: ^Wnd_Class_Ex_A) -> i16 ---;
 	@(link_name="RegisterClassExW") register_class_ex_w :: proc(wc: ^Wnd_Class_Ex_W) -> i16 ---;
 
@@ -134,8 +136,10 @@ foreign user32 {
 	@(link_name="PeekMessageW") peek_message_w :: proc(msg: ^Msg, hwnd: Hwnd, msg_filter_min, msg_filter_max, remove_msg: u32) -> Bool ---;
 
 
-	@(link_name="PostMessageA") post_message_a :: proc(hwnd: Hwnd, msg, wparam, lparam: u32) -> Bool ---;
-	@(link_name="PostMessageW") post_message_w :: proc(hwnd: Hwnd, msg, wparam, lparam: u32) -> Bool ---;
+	@(link_name="PostMessageA") post_message_a :: proc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Bool ---;
+	@(link_name="PostMessageW") post_message_w :: proc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Bool ---;
+	@(link_name="SendMessageA") send_message_a :: proc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Bool ---;
+	@(link_name="SendMessageW") send_message_w :: proc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Bool ---;
 
 	@(link_name="DefWindowProcA") def_window_proc_a :: proc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Lresult ---;
 	@(link_name="DefWindowProcW") def_window_proc_w :: proc(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Lresult ---;
@@ -230,9 +234,14 @@ foreign user32 {
 	@(link_name="GetPropA") get_prop_a :: proc(wnd: Hwnd, s: cstring) -> Handle ---
 	@(link_name="GetPropW") get_prop_w :: proc(wnd: Hwnd, s: Wstring) -> Handle ---
 
+	@(link_name="MessageBoxA") message_box_a :: proc(wnd: Hwnd, text, caption: cstring, type: u32) -> i32 ---
+	@(link_name="MessageBoxW") message_box_w :: proc(wnd: Hwnd, text, caption: Wstring, type: u32) -> i32 ---
 
 	@(link_name="MessageBoxExA") message_box_ex_a :: proc(wnd: Hwnd, text, caption: cstring, type: u32, language_id: u16) -> i32 ---
 	@(link_name="MessageBoxExW") message_box_ex_w :: proc(wnd: Hwnd, text, caption: Wstring, type: u32, language_id: u16) -> i32 ---
+
+	@(link_name="BeginPaint") begin_paint :: proc(wnd: Hwnd, paint: ^Paint_Struct) -> Hdc ---
+	@(link_name="EndPaint")   end_paint :: proc(wnd: Hwnd, paint: ^Paint_Struct) -> Bool ---
 }
 
 

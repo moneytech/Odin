@@ -5,6 +5,7 @@ enum TargetOsKind {
 	TargetOs_darwin,
 	TargetOs_linux,
 	TargetOs_essence,
+	TargetOs_js,
 
 	TargetOs_COUNT,
 };
@@ -14,6 +15,7 @@ enum TargetArchKind {
 
 	TargetArch_amd64,
 	TargetArch_386,
+	TargetArch_wasm32,
 
 	TargetArch_COUNT,
 };
@@ -33,12 +35,14 @@ String target_os_names[TargetOs_COUNT] = {
 	str_lit("darwin"),
 	str_lit("linux"),
 	str_lit("essence"),
+	str_lit("js"),
 };
 
 String target_arch_names[TargetArch_COUNT] = {
 	str_lit(""),
 	str_lit("amd64"),
 	str_lit("386"),
+	str_lit("wasm32"),
 };
 
 String target_endian_names[TargetEndian_COUNT] = {
@@ -51,11 +55,12 @@ TargetEndianKind target_endians[TargetArch_COUNT] = {
 	TargetEndian_Invalid,
 	TargetEndian_Little,
 	TargetEndian_Little,
+	TargetEndian_Little,
 };
 
 
 
-String const ODIN_VERSION = str_lit("0.12.0");
+String const ODIN_VERSION = str_lit("0.13.0");
 
 
 
@@ -65,6 +70,7 @@ struct TargetMetrics {
 	isize          word_size;
 	isize          max_align;
 	String         target_triplet;
+	String         target_data_layout;
 };
 
 
@@ -78,6 +84,12 @@ struct QueryDataSetSettings {
 	QueryDataSetKind kind;
 	bool ok;
 	bool compact;
+};
+
+enum BuildModeKind {
+	BuildMode_Executable,
+	BuildMode_DynamicLibrary,
+	BuildMode_Object,
 };
 
 
@@ -111,21 +123,31 @@ struct BuildContext {
 	bool   has_resource;
 	String opt_flags;
 	String llc_flags;
-	String target_triplet;
 	String link_flags;
-	bool   is_dll;
+	String extra_linker_flags;
+	BuildModeKind build_mode;
 	bool   generate_docs;
 	i32    optimization_level;
 	bool   show_timings;
 	bool   show_more_timings;
+	bool   show_system_calls;
 	bool   keep_temp_files;
 	bool   ignore_unknown_attributes;
 	bool   no_bounds_check;
+	bool   no_dynamic_literals;
 	bool   no_output_files;
 	bool   no_crt;
 	bool   use_lld;
 	bool   vet;
 	bool   cross_compiling;
+	bool   different_os;
+	bool   keep_object_files;
+
+	bool   use_llvm_api;
+
+	bool   use_subsystem_windows;
+	bool   ignore_microsoft_magic;
+	bool   linker_map_file;
 
 	QueryDataSetSettings query_data_set_settings;
 
@@ -145,14 +167,15 @@ gb_global TargetMetrics target_windows_386 = {
 	TargetArch_386,
 	4,
 	8,
-	str_lit("i686-pc-windows"),
+	str_lit("i386-pc-windows-msvc"),
 };
 gb_global TargetMetrics target_windows_amd64 = {
 	TargetOs_windows,
 	TargetArch_amd64,
 	8,
 	16,
-	str_lit("x86_64-pc-windows-gnu"),
+	str_lit("x86_64-pc-windows-msvc"),
+	str_lit("e-m:w-i64:64-f80:128-n8:16:32:64-S128"),
 };
 
 gb_global TargetMetrics target_linux_386 = {
@@ -160,7 +183,8 @@ gb_global TargetMetrics target_linux_386 = {
 	TargetArch_386,
 	4,
 	8,
-	str_lit("i686-pc-linux-gnu"),
+	str_lit("i386-pc-linux-gnu"),
+
 };
 gb_global TargetMetrics target_linux_amd64 = {
 	TargetOs_linux,
@@ -168,6 +192,7 @@ gb_global TargetMetrics target_linux_amd64 = {
 	8,
 	16,
 	str_lit("x86_64-pc-linux-gnu"),
+	str_lit("e-m:w-i64:64-f80:128-n8:16:32:64-S128"),
 };
 
 gb_global TargetMetrics target_darwin_amd64 = {
@@ -176,6 +201,7 @@ gb_global TargetMetrics target_darwin_amd64 = {
 	8,
 	16,
 	str_lit("x86_64-apple-darwin"),
+	str_lit("e-m:o-i64:64-f80:128-n8:16:32:64-S128"),
 };
 
 gb_global TargetMetrics target_essence_amd64 = {
@@ -186,14 +212,25 @@ gb_global TargetMetrics target_essence_amd64 = {
 	str_lit("x86_64-pc-none-elf"),
 };
 
+gb_global TargetMetrics target_js_wasm32 = {
+	TargetOs_js,
+	TargetArch_wasm32,
+	4,
+	8,
+	str_lit("wasm32-freestanding-js"),
+	str_lit(""),
+};
+
+
 struct NamedTargetMetrics {
 	String name;
 	TargetMetrics *metrics;
 };
 
 gb_global NamedTargetMetrics named_targets[] = {
+	{ str_lit("darwin_amd64"),  &target_darwin_amd64 },
 	{ str_lit("essence_amd64"), &target_essence_amd64 },
-	{ str_lit("darwin_amd64"),   &target_darwin_amd64 },
+	{ str_lit("js_wasm32"),     &target_js_wasm32 },
 	{ str_lit("linux_386"),     &target_linux_386 },
 	{ str_lit("linux_amd64"),   &target_linux_amd64 },
 	{ str_lit("windows_386"),   &target_windows_386 },
@@ -569,47 +606,47 @@ void init_build_context(TargetMetrics *cross_target) {
 	bc->ODIN_VERSION = ODIN_VERSION;
 	bc->ODIN_ROOT    = odin_root_dir();
 
-	TargetMetrics metrics = {};
+	TargetMetrics *metrics = nullptr;
 
 	#if defined(GB_ARCH_64_BIT)
 		#if defined(GB_SYSTEM_WINDOWS)
-			metrics = target_windows_amd64;
+			metrics = &target_windows_amd64;
 		#elif defined(GB_SYSTEM_OSX)
-			metrics = target_darwin_amd64;
+			metrics = &target_darwin_amd64;
 		#else
-			metrics = target_linux_amd64;
+			metrics = &target_linux_amd64;
 		#endif
 	#else
 		#if defined(GB_SYSTEM_WINDOWS)
-			metrics = target_windows_386;
+			metrics = &target_windows_386;
 		#elif defined(GB_SYSTEM_OSX)
-			#error "Unsupported architecture"
+			#error "Build Error: Unsupported architecture"
 		#else
-			metrics = target_linux_386;
+			metrics = &target_linux_386;
 		#endif
 	#endif
 
-	if (cross_target) {
-		metrics = *cross_target;
+	if (cross_target != nullptr && metrics != cross_target) {
+		bc->different_os = cross_target->os != metrics->os;
 		bc->cross_compiling = true;
+		metrics = cross_target;
 	}
 
-	GB_ASSERT(metrics.os != TargetOs_Invalid);
-	GB_ASSERT(metrics.arch != TargetArch_Invalid);
-	GB_ASSERT(metrics.word_size > 1);
-	GB_ASSERT(metrics.max_align > 1);
+	GB_ASSERT(metrics->os != TargetOs_Invalid);
+	GB_ASSERT(metrics->arch != TargetArch_Invalid);
+	GB_ASSERT(metrics->word_size > 1);
+	GB_ASSERT(metrics->max_align > 1);
 
 
-	bc->metrics = metrics;
-	bc->ODIN_OS     = target_os_names[metrics.os];
-	bc->ODIN_ARCH   = target_arch_names[metrics.arch];
-	bc->ODIN_ENDIAN = target_endian_names[target_endians[metrics.arch]];
-	bc->endian_kind = target_endians[metrics.arch];
-	bc->word_size   = metrics.word_size;
-	bc->max_align   = metrics.max_align;
+	bc->metrics = *metrics;
+	bc->ODIN_OS     = target_os_names[metrics->os];
+	bc->ODIN_ARCH   = target_arch_names[metrics->arch];
+	bc->ODIN_ENDIAN = target_endian_names[target_endians[metrics->arch]];
+	bc->endian_kind = target_endians[metrics->arch];
+	bc->word_size   = metrics->word_size;
+	bc->max_align   = metrics->max_align;
 	bc->link_flags  = str_lit(" ");
 	bc->opt_flags   = str_lit(" ");
-	bc->target_triplet = metrics.target_triplet;
 
 
 	gbString llc_flags = gb_string_make_reserve(heap_allocator(), 64);
@@ -648,12 +685,13 @@ void init_build_context(TargetMetrics *cross_target) {
 			bc->link_flags = str_lit("-arch x86 ");
 			break;
 		}
+	} else if (bc->metrics.arch == TargetArch_wasm32) {
+		bc->link_flags = str_lit("--no-entry --export-table --export-all --allow-undefined ");
 	} else {
-		gb_printf_err("Unsupported architecture\n");;
+		gb_printf_err("Compiler Error: Unsupported architecture\n");;
 		gb_exit(1);
 	}
 
-	bc->llc_flags = make_string_c(llc_flags);
 
 	bc->optimization_level = gb_clamp(bc->optimization_level, 0, 3);
 
@@ -666,8 +704,11 @@ void init_build_context(TargetMetrics *cross_target) {
 		//   -memcpyopt: MemCpy optimization
 	}
 	if (bc->ODIN_DEBUG == false) {
-		opt_flags = gb_string_appendc(opt_flags, "-memcpyopt -die ");
+		opt_flags = gb_string_appendc(opt_flags, "-mem2reg -memcpyopt -die ");
 	}
+
+	bc->llc_flags = make_string_c(llc_flags);
+
 
 	// NOTE(lachsinc): This optimization option was previously required to get
 	// around an issue in fmt.odin. Thank bp for tracking it down! Leaving for now until the issue

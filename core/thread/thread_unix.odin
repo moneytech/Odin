@@ -2,6 +2,7 @@
 package thread;
 
 import "core:runtime"
+import "core:intrinsics"
 import "core:sync"
 import "core:sys/unix"
 
@@ -19,6 +20,7 @@ Thread_Os_Specific :: struct #align 16 {
 	// signal to start it.
 	// destroyed after thread is started.
 	start_gate: sync.Condition,
+	start_mutex: sync.Mutex,
 
 	// if true, the thread has been started and the start_gate has been destroyed.
 	started: bool,
@@ -40,31 +42,26 @@ Thread_Priority :: enum {
 // Creates a thread which will run the given procedure.
 // It then waits for `start` to be called.
 //
-// You may provide a slice of bytes to use as the stack for the new thread,
-// but if you do, you are expected to set up the guard pages yourself.
-//
-// The stack must also be aligned appropriately for the platform.
-// We require it's at least 16 bytes aligned to help robustness; other
-// platforms may require page-size alignment.
-// Note also that pthreads requires the stack is at least 6 OS pages in size:
-// 4 are required by pthreads, and two extra for guards pages that will be applied.
-//
 create :: proc(procedure: Thread_Proc, priority := Thread_Priority.Normal) -> ^Thread {
 	__linux_thread_entry_proc :: proc "c" (t: rawptr) -> rawptr {
+		context = runtime.default_context();
+
 		t := (^Thread)(t);
 		sync.condition_wait_for(&t.start_gate);
 		sync.condition_destroy(&t.start_gate);
+		sync.mutex_destroy(&t.start_mutex);
 		t.start_gate = {};
+		t.start_mutex = {};
 
 		c := context;
-		if t.use_init_context {
-			c = t.init_context;
+		if ic, ok := t.init_context.?; ok {
+			c = ic;
 		}
 		context = c;
 
 		t.procedure(t);
 
-		if !t.use_init_context {
+		if t.init_context == nil {
 			if context.temp_allocator.data == &runtime.global_default_temp_allocator_data {
 				runtime.default_temp_allocator_destroy(auto_cast context.temp_allocator.data);
 			}
@@ -102,7 +99,8 @@ create :: proc(procedure: Thread_Proc, priority := Thread_Priority.Normal) -> ^T
 	res = unix.pthread_attr_setschedparam(&attrs, &params);
 	assert(res == 0);
 
-	sync.condition_init(&thread.start_gate);
+	sync.mutex_init(&thread.start_mutex);
+	sync.condition_init(&thread.start_gate, &thread.start_mutex);
 	if unix.pthread_create(&thread.unix_thread, &attrs, __linux_thread_entry_proc, thread) != 0 {
 		free(thread);
 		return nil;
@@ -122,7 +120,9 @@ is_done :: proc(t: ^Thread) -> bool {
 }
 
 join :: proc(t: ^Thread) {
-	if unix.pthread_equal(unix.pthread_self(), t.unix_thread) do return;
+	if unix.pthread_equal(unix.pthread_self(), t.unix_thread) {
+		return;
+	}
 	// if unix.pthread_self().x == t.unix_thread.x do return;
 
 	// NOTE(tetra): It's apparently UB for multiple threads to join the same thread
@@ -133,8 +133,10 @@ join :: proc(t: ^Thread) {
 	// sure it makes sense to need to join from multiple threads?
 	if sync.atomic_swap(&t.already_joined, true, .Sequentially_Consistent) {
 		for {
-			if sync.atomic_load(&t.done, .Sequentially_Consistent) do return;
-			sync.yield_processor();
+			if sync.atomic_load(&t.done, .Sequentially_Consistent) {
+				return;
+			}
+			intrinsics.cpu_relax();
 		}
 	}
 
@@ -143,12 +145,23 @@ join :: proc(t: ^Thread) {
 	// We do this instead because I don't know if there is a danger
 	// that you may join a different thread from the one you called join on,
 	// if the thread handle is reused.
-	if sync.atomic_load(&t.done, .Sequentially_Consistent) do return;
+	if sync.atomic_load(&t.done, .Sequentially_Consistent) {
+		return;
+	}
 
-	ret := unix.pthread_join(t.unix_thread, nil);
-	assert(ret == 0, "cannot join thread");
-	assert(sync.atomic_load(&t.done, .Sequentially_Consistent), "thread not done after join");
+	ret_val: rawptr;
+	_ = unix.pthread_join(t.unix_thread, &ret_val);
+	if !sync.atomic_load(&t.done, .Sequentially_Consistent) {
+		panic("thread not done after join");
+	}
 }
+
+join_multiple :: proc(threads: ..^Thread) {
+	for t in threads {
+		join(t);
+	}
+}
+
 
 destroy :: proc(t: ^Thread) {
 	join(t);

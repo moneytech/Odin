@@ -23,7 +23,58 @@ _digit_value :: proc(r: rune) -> int {
 	return v;
 }
 
-parse_i64 :: proc(str: string) -> i64 {
+// Parses an integer value from a string, in the given base, without a prefix.
+//
+// Returns ok=false if no numeric value of the appropriate base could be found.
+//
+// ```
+// n, ok := strconv.parse_i64_of_base("-1234eeee", 10);
+// assert(n == -1234 && ok);
+// ```
+parse_i64_of_base :: proc(str: string, base: int) -> (value: i64, ok: bool) {
+	assert(base <= 16, "base must be 1-16");
+	s := str;
+	neg := false;
+	if len(s) > 1 {
+		switch s[0] {
+		case '-':
+			neg = true;
+			s = s[1:];
+		case '+':
+			s = s[1:];
+		}
+	}
+
+	i := 0;
+	for r in s {
+		if r == '_' {
+			i += 1;
+			continue;
+		}
+		v := i64(_digit_value(r));
+		if v >= i64(base) do break;
+		value *= i64(base);
+		value += v;
+		i += 1;
+	}
+
+	if neg do value = -value;
+	ok = i > 0;
+	return;
+}
+
+// Parses a integer value from a string, in base 10, unless there's a prefix.
+//
+// Returns ok=false if a base 10 integer could not be found.
+//
+// ```
+// n, ok := strconv.parse_i64_maybe_prefixed("1234");
+// assert(n == 1234 && ok);
+//
+// n, ok = strconv.parse_i64_maybe_prefixed("0xeeee");
+// assert(n == 0xeeee && ok);
+// ```
+parse_i64_maybe_prefixed :: proc(str: string) -> (value: i64, ok: bool) {
 	s := str;
 	neg := false;
 	if len(s) > 1 {
@@ -48,28 +99,76 @@ parse_i64 :: proc(str: string) -> i64 {
 		}
 	}
 
-
-	value: i64;
+	i := 0;
 	for r in s {
 		if r == '_' {
+			i += 1;
 			continue;
 		}
-
 		v := i64(_digit_value(r));
-		if v >= base {
-			break;
-		}
+		if v >= base do break;
 		value *= base;
 		value += v;
+		i += 1;
 	}
 
-	if neg do return -value;
-	return value;
+	if neg do value = -value;
+	ok = i > 0;
+	return;
 }
 
-parse_u64 :: proc(str: string) -> u64 {
+parse_i64 :: proc{parse_i64_maybe_prefixed, parse_i64_of_base};
+
+// Parses an unsigned integer value from a string, in the given base, and
+// without a prefix.
+//
+// Returns ok=false if no numeric value of the appropriate base could be found.
+//
+// ```
+// n, ok := strconv.parse_u64_of_base("1234eeee", 10);
+// assert(n == 1234 && ok);
+//
+// n, ok = strconv.parse_u64_of_base("5678eeee", 16);
+// assert(n == 0x5678eeee && ok);
+// ```
+parse_u64_of_base :: proc(str: string, base: int) -> (value: u64, ok: bool) {
+	assert(base <= 16, "base must be 1-16");
 	s := str;
-	neg := false;
+	if len(s) > 1 && s[0] == '+' {
+		s = s[1:];
+	}
+
+	i := 0;
+	for r in s {
+		if r == '_' {
+			i += 1;
+			continue;
+		}
+		v := u64(_digit_value(r));
+		if v >= u64(base) do break;
+		value *= u64(base);
+		value += v;
+		i += 1;
+	}
+
+	ok = i > 0;
+	return;
+}
+
+// Parses an unsigned integer value from a string in base 10, unless there's a prefix.
+//
+// Returns ok=false if a base 10 integer could not be found, or
+// if the value was negative.
+//
+// ```
+// n, ok := strconv.parse_u64_maybe_prefixed("1234");
+// assert(n == 1234 && ok);
+//
+// n, ok = strconv.parse_u64_maybe_prefixed("0xeeee");
+// assert(n == 0xeeee && ok);
+// ```
+parse_u64_maybe_prefixed :: proc(str: string) -> (value: u64, ok: bool) {
+	s := str;
 	if len(s) > 1 && s[0] == '+' {
 		s = s[1:];
 	}
@@ -86,36 +185,112 @@ parse_u64 :: proc(str: string) -> u64 {
 		}
 	}
 
-
-	value: u64;
+	i := 0;
 	for r in s {
-		if r == '_' do continue;
+		if r == '_' {
+			i += 1;
+			continue;
+		}
 		v := u64(_digit_value(r));
 		if v >= base do break;
 		value *= base;
 		value += u64(v);
+		i += 1;
 	}
 
-	if neg do return -value;
-	return value;
+	ok = i > 0;
+	return;
+}
+
+parse_u64 :: proc{parse_u64_maybe_prefixed, parse_u64_of_base};
+
+// Parses an integer value from a string in the given base, or
+// - if the string has a prefix (e.g: '0x') then that will determine the base;
+// - otherwise, assumes base 10.
+//
+// Returns ok=false if no appropriate value could be found.
+//
+// ```
+// n, ok := strconv.parse_int("1234"); // without prefix, inferred base 10
+// assert(n == 1234 && ok);
+//
+// n, ok = strconv.parse_int("ffff", 16); // without prefix, explicit base
+// assert(n == 0xffff && ok);
+//
+// n, ok = strconv.parse_int("0xffff"); // with prefix and inferred base
+// assert(n == 0xffff && ok);
+// ```
+parse_int :: proc(s: string, base := 0) -> (value: int, ok: bool) {
+	v: i64 = ---;
+	switch base {
+	case 0:  v, ok = parse_i64_maybe_prefixed(s);
+	case:    v, ok = parse_i64_of_base(s, base);
+	}
+	value = int(v);
+	return;
 }
 
 
-parse_int :: proc(s: string) -> int {
-	return int(parse_i64(s));
-}
-parse_uint :: proc(s: string) -> uint {
-	return uint(parse_u64(s));
+// Parses an unsigned integer value from a string in the given base, or
+// - if the string has a prefix (e.g: '0x') then that will determine the base;
+// - otherwise, assumes base 10.
+//
+// Returns ok=false if:
+// - no appropriate value could be found; or
+// - the value was negative.
+//
+// ```
+// n, ok := strconv.parse_uint("1234"); // without prefix, inferred base 10
+// assert(n == 1234 && ok);
+//
+// n, ok = strconv.parse_uint("ffff", 16); // without prefix, explicit base
+// assert(n == 0xffff && ok);
+//
+// n, ok = strconv.parse_uint("0xffff"); // with prefix and inferred base
+// assert(n == 0xffff && ok);
+// ```
+parse_uint :: proc(s: string, base := 0) -> (value: uint, ok: bool) {
+	v: u64 = ---;
+	switch base {
+	case 0:  v, ok = parse_u64_maybe_prefixed(s);
+	case:    v, ok = parse_u64_of_base(s, base);
+	}
+	value = uint(v);
+	return;
 }
 
-parse_f32 :: proc(s: string) -> f32 {
-	return f32(parse_f64(s));
+
+// Parses a 32-bit floating point number from a string.
+//
+// Returns ok=false if a base 10 float could not be found.
+//
+// ```
+// n, ok := strconv.parse_f32("12.34eee");
+// assert(n == 12.34 && ok);
+//
+// n, ok = strconv.parse_f32("12.34");
+// assert(n == 12.34 && ok);
+// ```
+parse_f32 :: proc(s: string) -> (value: f32, ok: bool) {
+	v: f64 = ---;
+	v, ok = parse_f64(s);
+	return f32(v), ok;
 }
 
-
-parse_f64 :: proc(s: string) -> f64 {
+// Parses a 64-bit floating point number from a string.
+//
+// Returns ok=false if a base 10 float could not be found.
+//
+// ```
+// n, ok := strconv.parse_f32("12.34eee");
+// assert(n == 12.34 && ok);
+//
+// n, ok = strconv.parse_f32("12.34");
+// assert(n == 12.34 && ok);
+// ```
+parse_f64 :: proc(s: string) -> (value: f64, ok: bool) {
 	if s == "" {
-		return 0;
+		return;
 	}
 	i := 0;
 
@@ -125,7 +300,6 @@ parse_f64 :: proc(s: string) -> f64 {
 	case '+': i += 1;
 	}
 
-	value: f64 = 0;
 	for ; i < len(s); i += 1 {
 		r := rune(s[i]);
 		if r == '_' do continue;
@@ -180,8 +354,14 @@ parse_f64 :: proc(s: string) -> f64 {
 		}
 	}
 
-	if frac do return sign * (value/scale);
-	return sign * (value*scale);
+	if frac {
+		value = sign * (value/scale);
+	} else {
+		value = sign * (value*scale);
+	}
+
+	ok = i > 0;
+	return;
 }
 
 
@@ -203,10 +383,12 @@ itoa :: proc(buf: []byte, i: int) -> string {
 	return append_int(buf, i64(i), 10);
 }
 atoi :: proc(s: string) -> int {
-	return parse_int(s);
+	v, _ := parse_int(s);
+	return v;
 }
 atof :: proc(s: string) -> f64 {
-	return parse_f64(s);
+	v, _  := parse_f64(s);
+	return v;
 }
 
 ftoa :: append_float;
@@ -305,4 +487,158 @@ quote_rune :: proc(buf: []byte, r: rune) -> string {
 	write_byte(buf, &i, '\'');
 
 	return string(buf[:i]);
+}
+
+
+
+
+unquote_char :: proc(str: string, quote: byte) -> (r: rune, multiple_bytes: bool, tail_string: string, success: bool) {
+	hex_to_int :: proc(c: byte) -> int {
+		switch c {
+		case '0'..'9': return int(c-'0');
+		case 'a'..'f': return int(c-'a')+10;
+		case 'A'..'F': return int(c-'A')+10;
+		}
+		return -1;
+	}
+	w: int;
+
+	if str[0] == quote && quote == '"' {
+		return;
+	} else if str[0] >= 0x80 {
+		r, w = utf8.decode_rune_in_string(str);
+		return r, true, str[w:], true;
+	} else if str[0] != '\\' {
+		return rune(str[0]), false, str[1:], true;
+	}
+
+	if len(str) <= 1 {
+		return;
+	}
+	s := str;
+	c := s[1];
+	s = s[2:];
+
+	switch c {
+	case:
+		return;
+
+	case 'a':  r = '\a';
+	case 'b':  r = '\b';
+	case 'f':  r = '\f';
+	case 'n':  r = '\n';
+	case 'r':  r = '\r';
+	case 't':  r = '\t';
+	case 'v':  r = '\v';
+	case '\\': r = '\\';
+
+	case '"':  r = '"';
+	case '\'': r = '\'';
+
+	case '0'..'7':
+		v := int(c-'0');
+		if len(s) < 2 {
+			return;
+		}
+		for i in 0..<len(s) {
+			d := int(s[i]-'0');
+			if d < 0 || d > 7 {
+				return;
+			}
+			v = (v<<3) | d;
+		}
+		s = s[2:];
+		if v > 0xff {
+			return;
+		}
+		r = rune(v);
+
+	case 'x', 'u', 'U':
+		count: int;
+		switch c {
+		case 'x': count = 2;
+		case 'u': count = 4;
+		case 'U': count = 8;
+		}
+
+		if len(s) < count {
+			return;
+		}
+
+		for i in 0..<count {
+			d := hex_to_int(s[i]);
+			if d < 0 {
+				return;
+			}
+			r = (r<<4) | rune(d);
+		}
+		s = s[count:];
+		if c == 'x' {
+			break;
+		}
+		if r > utf8.MAX_RUNE {
+			return;
+		}
+		multiple_bytes = true;
+	}
+
+	success = true;
+	tail_string = s;
+	return;
+}
+
+unquote_string :: proc(lit: string, allocator := context.allocator) -> (res: string, allocated, success: bool) {
+	contains_rune :: proc(s: string, r: rune) -> int {
+		for c, offset in s {
+			if c == r do return offset;
+		}
+		return -1;
+	}
+
+	assert(len(lit) >= 2);
+	if lit[0] == '`' {
+		return lit[1:len(lit)-1], false, true;
+	}
+
+	s := lit;
+	quote := '"';
+
+	if s == `""` {
+		return "", false, true;
+	}
+
+	if contains_rune(s, '\n') >= 0 {
+		return s, false, false;
+	}
+
+	if contains_rune(s, '\\') < 0 && contains_rune(s, quote) < 0 {
+		if quote == '"' {
+			return s, false, true;
+		}
+	}
+
+
+	buf_len := 3*len(s) / 2;
+	buf := make([]byte, buf_len, allocator);
+	offset := 0;
+	for len(s) > 0 {
+		r, multiple_bytes, tail_string, ok := unquote_char(s, byte(quote));
+		if !ok {
+			delete(buf);
+			return s, false, false;
+		}
+		s = tail_string;
+		if r < 0x80 || !multiple_bytes {
+			buf[offset] = byte(r);
+			offset += 1;
+		} else {
+			b, w := utf8.encode_rune(r);
+			copy(buf[offset:], b[:w]);
+			offset += w;
+		}
+	}
+
+	new_string := string(buf[:offset]);
+
+	return new_string, true, true;
 }

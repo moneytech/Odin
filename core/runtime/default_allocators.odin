@@ -50,7 +50,7 @@ default_temp_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode
 		     context.allocator.data != allocator_data) {
 			a = default_allocator();
 		}
-		default_temp_allocator_init(allocator, make([]byte, 1<<22, a), a);
+		default_temp_allocator_init(allocator, make([]byte, DEFAULT_SCRATCH_BACKING_SIZE, a), a);
 	}
 
 	switch mode {
@@ -124,12 +124,24 @@ default_temp_allocator_proc :: proc(allocator_data: rawptr, mode: Allocator_Mode
 		clear(&allocator.leaked_allocations);
 
 	case .Resize:
-		last_ptr := rawptr(&allocator.data[allocator.prev_offset]);
+		last_ptr := #no_bounds_check rawptr(&allocator.data[allocator.prev_offset]);
 		if old_memory == last_ptr && len(allocator.data)-allocator.prev_offset >= size {
 			allocator.curr_offset = allocator.prev_offset+size;
 			return old_memory;
 		}
-		return default_temp_allocator_proc(allocator_data, Allocator_Mode.Alloc, size, alignment, old_memory, old_size, flags, loc);
+		ptr := default_temp_allocator_proc(allocator_data, Allocator_Mode.Alloc, size, alignment, old_memory, old_size, flags, loc);
+		mem_copy(ptr, old_memory, old_size);
+		return ptr;
+
+	case .Query_Features:
+		set := (^Allocator_Mode_Set)(old_memory);
+		if set != nil {
+			set^ = {.Alloc, .Free, .Free_All, .Resize, .Query_Features};
+		}
+		return set;
+
+	case .Query_Info:
+		return nil;
 	}
 
 	return nil;

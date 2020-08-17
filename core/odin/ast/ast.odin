@@ -200,6 +200,24 @@ Ternary_Expr :: struct {
 	y:    ^Expr,
 }
 
+Ternary_If_Expr :: struct {
+	using node: Expr,
+	x: ^Expr,
+	op1:  tokenizer.Token,
+	cond:    ^Expr,
+	op2:  tokenizer.Token,
+	y:    ^Expr,
+}
+
+Ternary_When_Expr :: struct {
+	using node: Expr,
+	x: ^Expr,
+	op1:  tokenizer.Token,
+	cond:    ^Expr,
+	op2:  tokenizer.Token,
+	y:    ^Expr,
+}
+
 Type_Assertion :: struct {
 	using node: Expr,
 	expr:  ^Expr,
@@ -264,6 +282,7 @@ Block_Stmt :: struct {
 	open:  tokenizer.Pos,
 	stmts: []^Stmt,
 	close: tokenizer.Pos,
+	uses_do: bool,
 }
 
 If_Stmt :: struct {
@@ -590,6 +609,7 @@ Union_Type :: struct {
 	variants:    []^Expr,
 	where_token: tokenizer.Token,
 	where_clauses: []^Expr,
+	is_maybe:	 bool,
 }
 
 Enum_Type :: struct {

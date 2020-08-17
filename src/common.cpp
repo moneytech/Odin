@@ -8,6 +8,7 @@
 #endif
 
 #if defined(GB_SYSTEM_WINDOWS)
+
 #define NOMINMAX            1
 #include <windows.h>
 #undef NOMINMAX
@@ -20,7 +21,19 @@
 #include <wchar.h>
 #include <stdio.h>
 
+#if defined(GB_COMPILER_MSVC)
+#include <psapi.h>
+#endif
+
 #include <math.h>
+#include <string.h>
+
+gb_inline void zero_size(void *ptr, isize len) {
+	memset(ptr, 0, len);
+}
+
+#define zero_item(ptr) zero_size((ptr), gb_size_of(ptr))
+
 
 template <typename U, typename V>
 gb_inline U bit_cast(V &v) { return reinterpret_cast<U &>(v); }
@@ -68,7 +81,7 @@ GB_ALLOCATOR_PROC(heap_allocator_proc) {
 	case gbAllocation_Alloc:
 		ptr = _aligned_malloc(size, alignment);
 		if (flags & gbAllocatorFlag_ClearToZero) {
-			gb_zero_size(ptr, size);
+			zero_size(ptr, size);
 		}
 		break;
 	case gbAllocation_Free:
@@ -99,7 +112,7 @@ GB_ALLOCATOR_PROC(heap_allocator_proc) {
 		// ptr = malloc(size+alignment);
 
 		if (flags & gbAllocatorFlag_ClearToZero) {
-			gb_zero_size(ptr, size);
+			zero_size(ptr, size);
 		}
 		break;
 	}
@@ -120,7 +133,7 @@ GB_ALLOCATOR_PROC(heap_allocator_proc) {
 		posix_memalign(&ptr, alignment, size);
 
 		if (flags & gbAllocatorFlag_ClearToZero) {
-			gb_zero_size(ptr, size);
+			zero_size(ptr, size);
 		}
 		break;
 	}
@@ -152,7 +165,15 @@ GB_ALLOCATOR_PROC(heap_allocator_proc) {
 
 #include "range_cache.cpp"
 
-
+u32 fnv32a(void const *data, isize len) {
+	u8 const *bytes = cast(u8 const *)data;
+	u32 h = 0x811c9dc5;
+	for (isize i = 0; i < len; i++) {
+		u32 b = cast(u32)bytes[i];
+		h = (h ^ b) * 0x01000193;
+	}
+	return h;
+}
 
 u64 fnv64a(void const *data, isize len) {
 	u8 const *bytes = cast(u8 const *)data;
@@ -335,13 +356,6 @@ void mul_overflow_u64(u64 x, u64 y, u64 *lo, u64 *hi) {
 
 
 
-#include "map.cpp"
-#include "ptr_set.cpp"
-#include "string_set.cpp"
-#include "priority_queue.cpp"
-#include "thread_pool.cpp"
-
-
 gb_global String global_module_path = {0};
 gb_global bool global_module_path_set = false;
 
@@ -369,27 +383,27 @@ typedef struct Arena {
 void arena_init(Arena *arena, gbAllocator backing, isize block_size=ARENA_DEFAULT_BLOCK_SIZE) {
 	arena->backing = backing;
 	arena->block_size = block_size;
-	array_init(&arena->blocks, backing);
+	array_init(&arena->blocks, backing, 0, 2);
 	gb_mutex_init(&arena->mutex);
 }
 
 void arena_grow(Arena *arena, isize min_size) {
-	gb_mutex_lock(&arena->mutex);
-	defer (gb_mutex_unlock(&arena->mutex));
+	// gb_mutex_lock(&arena->mutex);
+	// defer (gb_mutex_unlock(&arena->mutex));
 
 	isize size = gb_max(arena->block_size, min_size);
 	size = ALIGN_UP(size, ARENA_MIN_ALIGNMENT);
 	void *new_ptr = gb_alloc(arena->backing, size);
 	arena->ptr = cast(u8 *)new_ptr;
-	// gb_zero_size(arena->ptr, size); // NOTE(bill): This should already be zeroed
+	// zero_size(arena->ptr, size); // NOTE(bill): This should already be zeroed
 	GB_ASSERT(arena->ptr == ALIGN_DOWN_PTR(arena->ptr, ARENA_MIN_ALIGNMENT));
 	arena->end = arena->ptr + size;
 	array_add(&arena->blocks, arena->ptr);
 }
 
 void *arena_alloc(Arena *arena, isize size, isize alignment) {
-	gb_mutex_lock(&arena->mutex);
-	defer (gb_mutex_unlock(&arena->mutex));
+	// gb_mutex_lock(&arena->mutex);
+	// defer (gb_mutex_unlock(&arena->mutex));
 
 	arena->total_used += size;
 
@@ -404,13 +418,13 @@ void *arena_alloc(Arena *arena, isize size, isize alignment) {
 	arena->ptr = cast(u8 *)ALIGN_UP_PTR(arena->ptr + size, align);
 	GB_ASSERT(arena->ptr <= arena->end);
 	GB_ASSERT(ptr == ALIGN_DOWN_PTR(ptr, align));
-	gb_zero_size(ptr, size);
+	// zero_size(ptr, size);
 	return ptr;
 }
 
 void arena_free_all(Arena *arena) {
-	gb_mutex_lock(&arena->mutex);
-	defer (gb_mutex_unlock(&arena->mutex));
+	// gb_mutex_lock(&arena->mutex);
+	// defer (gb_mutex_unlock(&arena->mutex));
 
 	for_array(i, arena->blocks) {
 		gb_free(arena->backing, arena->blocks[i]);
@@ -456,6 +470,57 @@ GB_ALLOCATOR_PROC(arena_allocator_proc) {
 	return ptr;
 }
 
+
+
+
+
+
+#include "string_map.cpp"
+#include "map.cpp"
+#include "ptr_set.cpp"
+#include "string_set.cpp"
+#include "priority_queue.cpp"
+#include "thread_pool.cpp"
+
+
+struct StringIntern {
+	StringIntern *next;
+	isize len;
+	char str[1];
+};
+
+Map<StringIntern *> string_intern_map = {}; // Key: u64
+Arena string_intern_arena = {};
+
+char const *string_intern(char const *text, isize len) {
+	u64 hash = gb_fnv64a(text, len);
+	u64 key = hash ? hash : 1;
+	StringIntern **found = map_get(&string_intern_map, hash_integer(key));
+	if (found) {
+		for (StringIntern *it = *found; it != nullptr; it = it->next) {
+			if (it->len == len && gb_strncmp(it->str, (char *)text, len) == 0) {
+				return it->str;
+			}
+		}
+	}
+
+	StringIntern *new_intern = cast(StringIntern *)arena_alloc(&string_intern_arena, gb_offset_of(StringIntern, str) + len + 1, gb_align_of(StringIntern));
+	new_intern->len = len;
+	new_intern->next = found ? *found : nullptr;
+	gb_memmove(new_intern->str, text, len);
+	new_intern->str[len] = 0;
+	map_set(&string_intern_map, hash_integer(key), new_intern);
+	return new_intern->str;
+}
+
+char const *string_intern(String const &string) {
+	return string_intern(cast(char const *)string.text, string.len);
+}
+
+void init_string_interner(void) {
+	map_init(&string_intern_map, heap_allocator());
+	arena_init(&string_intern_arena, heap_allocator());
+}
 
 
 

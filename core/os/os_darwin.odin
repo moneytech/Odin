@@ -2,11 +2,11 @@ package os
 
 foreign import dl   "system:dl"
 foreign import libc "system:c"
+foreign import pthread "system:pthread"
 
 import "core:runtime"
 import "core:strings"
-
-OS :: "darwin";
+import "core:c"
 
 Handle    :: distinct i32;
 File_Time :: distinct u64;
@@ -150,19 +150,18 @@ EOWNERDEAD:			Errno : 105;		/* Previous owner died */
 EQFULL:	Errno : 106;		/* Interface output queue is full */
 ELAST:	Errno : 106;		/* Must be equal largest errno */
 
-O_RDONLY   :: 0x00000;
-O_WRONLY   :: 0x00001;
-O_RDWR     :: 0x00002;
-O_CREATE   :: 0x00040;
-O_EXCL     :: 0x00080;
-O_NOCTTY   :: 0x00100;
-O_TRUNC    :: 0x00200;
-O_NONBLOCK :: 0x00800;
-O_APPEND   :: 0x00400;
-O_SYNC     :: 0x01000;
-O_ASYNC    :: 0x02000;
-O_CLOEXEC  :: 0x80000;
-
+O_RDONLY   :: 0x0000;
+O_WRONLY   :: 0x0001;
+O_RDWR     :: 0x0002;
+O_CREATE   :: 0x0200;
+O_EXCL     :: 0x0800;
+O_NOCTTY   :: 0;
+O_TRUNC    :: 0x0400;
+O_NONBLOCK :: 0x0004;
+O_APPEND   :: 0x0008;
+O_SYNC     :: 0x0080;
+O_ASYNC    :: 0x0040;
+O_CLOEXEC  :: 0x1000000;
 
 SEEK_SET   :: 0;
 SEEK_CUR   :: 1;
@@ -201,10 +200,10 @@ Stat :: struct {
 	gid:           u32, // Group ID of the file's group
 	rdev:          i32, // Device ID, if device
 
-	last_access:   File_Time, // Time of last access
-	modified:      File_Time, // Time of last modification
-	status_change: File_Time, // Time of last status change
-	created:       File_Time, // Time of creation
+	last_access:   _File_Time, // Time of last access
+	modified:      _File_Time, // Time of last modification
+	status_change: _File_Time, // Time of last status change
+	created:       _File_Time, // Time of creation
 
 	size:          i64,  // Size of the file, in bytes
 	blocks:        i64,  // Number of blocks allocated for the file
@@ -263,14 +262,16 @@ X_OK :: 1; // Test for execute permission
 F_OK :: 0; // Test for file existance
 
 foreign libc {
-	@(link_name="open")    _unix_open    :: proc(path: cstring, flags: int, #c_vararg mode: ..any) -> Handle ---;
+	@(link_name="__error") __error :: proc() -> ^int ---;
+
+	@(link_name="open")    _unix_open    :: proc(path: cstring, flags: i32, mode: u16) -> Handle ---;
 	@(link_name="close")   _unix_close   :: proc(handle: Handle) ---;
 	@(link_name="read")    _unix_read    :: proc(handle: Handle, buffer: rawptr, count: int) -> int ---;
 	@(link_name="write")   _unix_write   :: proc(handle: Handle, buffer: rawptr, count: int) -> int ---;
 	@(link_name="lseek")   _unix_lseek   :: proc(fs: Handle, offset: int, whence: int) -> int ---;
 	@(link_name="gettid")  _unix_gettid  :: proc() -> u64 ---;
 	@(link_name="getpagesize") _unix_getpagesize :: proc() -> i32 ---;
-	@(link_name="stat")    _unix_stat    :: proc(path: cstring, stat: ^Stat) -> int ---;
+	@(link_name="stat64")    _unix_stat    :: proc(path: cstring, stat: ^Stat) -> int ---;
 	@(link_name="access")  _unix_access  :: proc(path: cstring, mask: int) -> int ---;
 
 	@(link_name="malloc")  _unix_malloc  :: proc(size: int) -> rawptr ---;
@@ -278,6 +279,8 @@ foreign libc {
 	@(link_name="free")    _unix_free    :: proc(ptr: rawptr) ---;
 	@(link_name="realloc") _unix_realloc :: proc(ptr: rawptr, size: int) -> rawptr ---;
 	@(link_name="getenv")  _unix_getenv  :: proc(cstring) -> cstring ---;
+	@(link_name="getcwd")  _unix_getcwd  :: proc(buf: cstring, len: c.size_t) -> cstring ---;
+	@(link_name="chdir")   _unix_chdir   :: proc(buf: cstring) -> c.int ---;
 
 	@(link_name="exit")    _unix_exit    :: proc(status: int) ---;
 }
@@ -289,9 +292,13 @@ foreign dl {
 	@(link_name="dlerror") _unix_dlerror :: proc() -> cstring ---;
 }
 
+get_last_error :: proc() -> int {
+	return __error()^;
+}
+
 open :: proc(path: string, flags: int = O_RDONLY, mode: int = 0) -> (Handle, Errno) {
 	cstr := strings.clone_to_cstring(path);
-	handle := _unix_open(cstr, flags, mode);
+	handle := _unix_open(cstr, i32(flags), u16(mode));
 	delete(cstr);
 	if handle == -1 {
 		return INVALID_HANDLE, 1;
@@ -309,7 +316,7 @@ write :: proc(fd: Handle, data: []u8) -> (int, Errno) {
 	if len(data) == 0 {
 		return 0, 0;
 	}
-	bytes_written := _unix_write(fd, &data[0], len(data));
+	bytes_written := _unix_write(fd, raw_data(data), len(data));
 	if(bytes_written == -1) {
 		return 0, 1;
 	}
@@ -319,7 +326,7 @@ write :: proc(fd: Handle, data: []u8) -> (int, Errno) {
 read :: proc(fd: Handle, data: []u8) -> (int, Errno) {
 	assert(fd != -1);
 
-	bytes_read := _unix_read(fd, &data[0], len(data));
+	bytes_read := _unix_read(fd, raw_data(data), len(data));
 	if bytes_read == -1 {
 		return 0, 1;
 	}
@@ -394,13 +401,41 @@ getenv :: proc(name: string) -> (string, bool) {
 	return string(cstr), true;
 }
 
+get_current_directory :: proc() -> string {
+	page_size := get_page_size(); // NOTE(tetra): See note in os_linux.odin/get_current_directory.
+	buf := make([dynamic]u8, page_size);
+	for {
+		cwd := _unix_getcwd(cstring(raw_data(buf)), c.size_t(len(buf)));
+		if cwd != nil {
+			return string(cwd);
+		}
+		if Errno(get_last_error()) != ERANGE {
+			return "";
+		}
+		resize(&buf, len(buf)+page_size);
+	}
+	unreachable();
+}
+
+set_current_directory :: proc(path: string) -> (err: Errno) {
+	cstr := strings.clone_to_cstring(path, context.temp_allocator);
+	res := _unix_chdir(cstr);
+	if res == -1 do return Errno(get_last_error());
+	return ERROR_NONE;
+}
+
 exit :: inline proc(code: int) -> ! {
 	_unix_exit(code);
 }
 
 current_thread_id :: proc "contextless" () -> int {
-	// return int(_unix_gettid());
-	return 0;
+	tid: u64;
+	// NOTE(Oskar): available from OSX 10.6 and iOS 3.2.
+	// For older versions there is `syscall(SYS_thread_selfid)`, but not really
+	// the same thing apparently.
+	foreign pthread { pthread_threadid_np :: proc "c" (rawptr, ^u64) -> c.int ---; }
+	pthread_threadid_np(nil, &tid);
+	return int(tid);
 }
 
 dlopen :: inline proc(filename: string, flags: int) -> rawptr {

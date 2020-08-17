@@ -69,7 +69,10 @@ HashKey hash_exact_value(ExactValue v) {
 	case ExactValue_Bool:
 		return hash_integer(u64(v.value_bool));
 	case ExactValue_String:
-		return hash_string(v.value_string);
+		{
+			char const *str = string_intern(v.value_string);
+			return hash_pointer(str);
+		}
 	case ExactValue_Integer:
 		{
 			HashKey key = hashing_proc(big_int_ptr(&v.value_integer), v.value_integer.len * gb_size_of(u64));
@@ -276,6 +279,11 @@ ExactValue exact_value_float_from_string(String string) {
 		} else {
 			GB_PANIC("Invalid hexadecimal float, expected 8 or 16 digits, got %td", digit_count);
 		}
+	}
+
+	if (!string_contains_char(string, '.') && !string_contains_char(string, '-')) {
+		// NOTE(bill): treat as integer
+		return exact_value_integer_from_string(string);
 	}
 
 	f64 f = float_from_string(string);
@@ -589,6 +597,10 @@ i32 exact_value_order(ExactValue const &v) {
 		return 5;
 	case ExactValue_Pointer:
 		return 6;
+	case ExactValue_Procedure:
+		return 7;
+	// case ExactValue_Compound:
+		// return 8;
 
 	default:
 		GB_PANIC("How'd you get here? Invalid Value.kind");
@@ -644,11 +656,16 @@ void match_exact_values(ExactValue *x, ExactValue *y) {
 
 	case ExactValue_Complex:
 		switch (y->kind) {
+		case ExactValue_Complex:
+			return;
 		case ExactValue_Quaternion:
 			*x = exact_value_to_quaternion(*x);
 			return;
 		}
 		break;
+
+	case ExactValue_Procedure:
+		return;
 	}
 
 	compiler_error("match_exact_values: How'd you get here? Invalid ExactValueKind %d", x->kind);
@@ -912,12 +929,23 @@ bool compare_exact_values(TokenKind op, ExactValue x, ExactValue y) {
 		case Token_NotEq: return !are_types_identical(x.value_typeid, y.value_typeid);
 		}
 		break;
+
+	case ExactValue_Procedure:
+		switch (op) {
+		case Token_CmpEq: return are_types_identical(x.value_typeid, y.value_typeid);
+		case Token_NotEq: return !are_types_identical(x.value_typeid, y.value_typeid);
+		}
+		break;
 	}
 
 	GB_PANIC("Invalid comparison");
 	return false;
 }
 
+Entity *strip_entity_wrapping(Ast *expr);
+Entity *strip_entity_wrapping(Entity *e);
+
+gbString write_expr_to_string(gbString str, Ast *node);
 
 gbString write_exact_value_to_string(gbString str, ExactValue const &v, isize string_limit=36) {
 	switch (v.kind) {
@@ -953,9 +981,9 @@ gbString write_exact_value_to_string(gbString str, ExactValue const &v, isize st
 	case ExactValue_Pointer:
 		return str;
 	case ExactValue_Compound:
-		return str;
+		return write_expr_to_string(str, v.value_compound);
 	case ExactValue_Procedure:
-		return str;
+		return write_expr_to_string(str, v.value_procedure);
 	}
 	return str;
 };

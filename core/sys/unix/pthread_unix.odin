@@ -14,7 +14,7 @@ foreign pthread {
 	pthread_create :: proc(t: ^pthread_t, attrs: ^pthread_attr_t, routine: proc(data: rawptr) -> rawptr, arg: rawptr) -> c.int ---;
 
 	// retval is a pointer to a location to put the return value of the thread proc.
-	pthread_join :: proc(t: pthread_t, retval: rawptr) -> c.int ---;
+	pthread_join :: proc(t: pthread_t, retval: ^rawptr) -> c.int ---;
 
 	pthread_self :: proc() -> pthread_t ---;
 
@@ -53,7 +53,7 @@ foreign pthread {
 	pthread_attr_getstack :: proc(attrs: ^pthread_attr_t, stack_ptr: ^rawptr, stack_size: ^u64) -> c.int ---;
 
 	sched_yield :: proc() -> c.int ---;
-	
+
 }
 
 @(default_calling_convention="c")
@@ -101,6 +101,7 @@ foreign pthread {
 
 	pthread_mutexattr_init :: proc(attrs: ^pthread_mutexattr_t) -> c.int ---;
 	pthread_mutexattr_destroy :: proc(attrs: ^pthread_mutexattr_t) -> c.int ---;
+	pthread_mutexattr_settype :: proc(attrs: ^pthread_mutexattr_t, type: c.int) -> c.int ---;
 
 	// p-shared = "process-shared" - i.e: is this mutex shared among multiple processes?
 	// values: PTHREAD_PROCESS_PRIVATE, PTHREAD_PROCESS_SHARED

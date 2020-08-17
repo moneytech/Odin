@@ -1,6 +1,7 @@
 package math
 
 import "intrinsics"
+_ :: intrinsics;
 
 Float_Class :: enum {
 	Normal,    // an ordinary nonzero floating point value
@@ -115,7 +116,7 @@ unlerp     :: proc{unlerp_f32, unlerp_f64};
 
 wrap :: proc(x, y: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
 	tmp := mod(x, y);
-	return tmp < 0 ? wrap + tmp : tmp;
+	return y + tmp if tmp < 0 else tmp;
 }
 angle_diff :: proc(a, b: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
 
@@ -128,7 +129,7 @@ angle_lerp :: proc(a, b, t: $T) -> T where intrinsics.type_is_numeric(T), !intri
 }
 
 step :: proc(edge, x: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
-	return x < edge ? 0 : 1;
+	return 0 if x < edge else 1;
 }
 
 smoothstep :: proc(edge0, edge1, x: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
@@ -246,10 +247,10 @@ trunc_f64 :: proc(x: f64) -> f64 {
 trunc :: proc{trunc_f32, trunc_f64};
 
 round_f32 :: proc(x: f32) -> f32 {
-	return x < 0 ? ceil(x - 0.5) : floor(x + 0.5);
+	return ceil(x - 0.5) if x < 0 else floor(x + 0.5);
 }
 round_f64 :: proc(x: f64) -> f64 {
-	return x < 0 ? ceil(x - 0.5) : floor(x + 0.5);
+	return ceil(x - 0.5) if x < 0 else floor(x + 0.5);
 }
 round :: proc{round_f32, round_f64};
 
@@ -610,7 +611,7 @@ next_power_of_two :: proc(x: int) -> int {
 }
 
 sum :: proc(x: $T/[]$E) -> (res: E)
-	where intrinsics.BuiltinProc_type_is_numeric(E) {
+	where intrinsics.type_is_numeric(E) {
 	for i in x {
 		res += i;
 	}
@@ -618,7 +619,7 @@ sum :: proc(x: $T/[]$E) -> (res: E)
 }
 
 prod :: proc(x: $T/[]$E) -> (res: E)
-	where intrinsics.BuiltinProc_type_is_numeric(E) {
+	where intrinsics.type_is_numeric(E) {
 	for i in x {
 		res *= i;
 	}
@@ -626,7 +627,7 @@ prod :: proc(x: $T/[]$E) -> (res: E)
 }
 
 cumsum_inplace :: proc(x: $T/[]$E) -> T
-	where intrinsics.BuiltinProc_type_is_numeric(E) {
+	where intrinsics.type_is_numeric(E) {
 	for i in 1..<len(x) {
 		x[i] = x[i-1] + x[i];
 	}
@@ -634,7 +635,7 @@ cumsum_inplace :: proc(x: $T/[]$E) -> T
 
 
 cumsum :: proc(dst, src: $T/[]$E) -> T
-	where intrinsics.BuiltinProc_type_is_numeric(E) {
+	where intrinsics.type_is_numeric(E) {
 	N := min(len(dst), len(src));
 	if N > 0 {
 		dst[0] = src[0];
@@ -742,26 +743,28 @@ atan2_f64 :: proc(y, x: f64) -> f64 {
 atan2 :: proc{atan2_f32, atan2_f64};
 
 atan_f32 :: proc(x: f32) -> f32 {
-	return atan2_f32(1.0, x);
+	return atan2_f32(x, 1);
 }
-atan :: proc{atan_f32};
-
+atan_f64 :: proc(x: f64) -> f64 {
+	return atan2_f64(x, 1);
+}
+atan :: proc{atan_f32, atan_f64};
 
 asin_f32 :: proc(x: f32) -> f32 {
-	return atan2_f32(x, sqrt_f32(1 - x*x));
+	return atan2_f32(x, 1 + sqrt_f32(1 - x*x));
 }
 asin_f64 :: proc(x: f64) -> f64 {
-	return atan2_f64(x, sqrt_f64(1 - x*x));
+	return atan2_f64(x, 1 + sqrt_f64(1 - x*x));
 }
-asin :: proc{asin_f32};
+asin :: proc{asin_f32, asin_f64};
 
 acos_f32 :: proc(x: f32) -> f32 {
-	return atan2_f32(sqrt_f32(1 - x), sqrt_f32(1 + x));
+	return 2 * atan2_f32(sqrt_f32(1 - x), sqrt_f32(1 + x));
 }
 acos_f64 :: proc(x: f64) -> f64 {
-	return atan2_f64(sqrt_f64(1 - x), sqrt_f64(1 + x));
+	return 2 * atan2_f64(sqrt_f64(1 - x), sqrt_f64(1 + x));
 }
-acos :: proc{acos_f32};
+acos :: proc{acos_f32, acos_f64};
 
 
 sinh_f32 :: proc(x: f32) -> f32 {

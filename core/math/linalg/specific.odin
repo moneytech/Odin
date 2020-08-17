@@ -1,14 +1,13 @@
 package linalg
 
 import "core:math"
-import "intrinsics"
 
 
 // Specific
 
 Float :: f32;
 
-FLOAT_EPSILON :: size_of(Float) == 4 ? 1e-7 : 1e-15;
+FLOAT_EPSILON :: 1e-7 when size_of(Float) == 4 else 1e-15;
 
 Vector2 :: distinct [2]Float;
 Vector3 :: distinct [3]Float;
@@ -39,7 +38,7 @@ Matrix2 :: Matrix2x2;
 Matrix3 :: Matrix3x3;
 Matrix4 :: Matrix4x4;
 
-Quaternion :: distinct (size_of(Float) == size_of(f32) ? quaternion128 : quaternion256);
+Quaternion :: distinct (quaternion128 when size_of(Float) == size_of(f32) else quaternion256);
 
 MATRIX1_IDENTITY :: Matrix1{{1}};
 MATRIX2_IDENTITY :: Matrix2{{1, 0}, {0, 1}};
@@ -71,8 +70,20 @@ vector3_orthogonal :: proc(v: Vector3) -> Vector3 {
 	y := abs(v.y);
 	z := abs(v.z);
 
-	other: Vector3 = x < y ? (x < z ? {1, 0, 0} : {0, 0, 1}) : (y < z ? {0, 1, 0} : {0, 0, 1});
-
+	other: Vector3;
+	if x < y {
+		if x < z {
+			other = {1, 0, 0};
+		} else {
+			other = {0, 0, 1};
+		}
+	} else {
+		if y < z {
+			other = {0, 1, 0};
+		} else {
+			other = {0, 0, 1};
+		}
+	}
 	return normalize(cross(v, other));
 }
 
@@ -124,7 +135,7 @@ vector4_hsl_to_rgb :: proc(h, s, l: Float, a: Float = 1) -> Vector4 {
 		g = l;
 		b = l;
 	} else {
-		q := l < 0.5 ? l * (1+s) : l+s - l*s;
+		q := l * (1+s) if l < 0.5 else l+s - l*s;
 		p := 2*l - q;
 		r = hue_to_rgb(p, q, h + 1.0/3.0);
 		g = hue_to_rgb(p, q, h);
@@ -147,10 +158,10 @@ vector4_rgb_to_hsl :: proc(col: Vector4) -> Vector4 {
 
 	if v_max != v_min {
 		d: = v_max - v_min;
-		s = l > 0.5 ? d / (2.0 - v_max - v_min) : d / (v_max + v_min);
+		s = d / (2.0 - v_max - v_min) if l > 0.5 else d / (v_max + v_min);
 		switch {
 		case v_max == r:
-			h = (g - b) / d + (g < b ? 6.0 : 0.0);
+			h = (g - b) / d + (6.0 if g < b else 0.0);
 		case v_max == g:
 			h = (b - r) / d + 2.0;
 		case v_max == b:
@@ -191,24 +202,24 @@ quaternion_from_euler_angles :: proc(roll, pitch, yaw: Float) -> Quaternion {
 
 euler_angles_from_quaternion :: proc(q: Quaternion) -> (roll, pitch, yaw: Float) {
 	// roll, x-axis rotation
-    sinr_cosp: Float = 2 * (q.w * q.x + q.y * q.z);
-    cosr_cosp: Float = 1 - 2 * (q.x * q.x + q.y * q.y);
-    roll = math.atan2(sinr_cosp, cosr_cosp);
+	sinr_cosp: Float = 2 * (q.w * q.x + q.y * q.z);
+	cosr_cosp: Float = 1 - 2 * (q.x * q.x + q.y * q.y);
+	roll = math.atan2(sinr_cosp, cosr_cosp);
 
-    // pitch, y-axis rotation
-    sinp: Float = 2 * (q.w * q.y - q.z * q.x);
-    if abs(sinp) >= 1 {
-        pitch = math.copy_sign(math.TAU * 0.25, sinp);
-    } else {
-        pitch = math.asin(sinp);
-    }
+	// pitch, y-axis rotation
+	sinp: Float = 2 * (q.w * q.y - q.z * q.x);
+	if abs(sinp) >= 1 {
+		pitch = math.copy_sign(math.TAU * 0.25, sinp);
+	} else {
+		pitch = 2 * math.asin(sinp);
+	}
 
-    // yaw, z-axis rotation
-    siny_cosp: Float = 2 * (q.w * q.z + q.x * q.y);
-    cosy_cosp: Float = 1 - 2 * (q.y * q.y + q.z * q.z);
-    yaw = math.atan2(siny_cosp, cosy_cosp);
+	// yaw, z-axis rotation
+	siny_cosp: Float = 2 * (q.w * q.z + q.x * q.y);
+	cosy_cosp: Float = 1 - 2 * (q.y * q.y + q.z * q.z);
+	yaw = math.atan2(siny_cosp, cosy_cosp);
 
-    return;
+	return;
 }
 
 quaternion_from_forward_and_up :: proc(forward, up: Vector3) -> Quaternion {
@@ -627,9 +638,9 @@ matrix4_inverse :: proc(m: Matrix4) -> Matrix4 {
 matrix4_minor :: proc(m: Matrix4, c, r: int) -> Float {
 	cut_down: Matrix3;
 	for i in 0..<3 {
-		col := i < c ? i : i+1;
+		col := i if i < c else i+1;
 		for j in 0..<3 {
-			row := j < r ? j : j+1;
+			row := j if j < r else j+1;
 			cut_down[i][j] = m[col][row];
 		}
 	}
@@ -638,7 +649,7 @@ matrix4_minor :: proc(m: Matrix4, c, r: int) -> Float {
 
 matrix4_cofactor :: proc(m: Matrix4, c, r: int) -> Float {
 	sign, minor: Float;
-	sign = (c + r) % 2 == 0 ? 1 : -1;
+	sign = 1 if (c + r) % 2 == 0 else -1;
 	minor = matrix4_minor(m, c, r);
 	return sign * minor;
 }

@@ -101,6 +101,14 @@ char *alloc_cstring(gbAllocator a, String s) {
 	return c_str;
 }
 
+char *cstring_duplicate(gbAllocator a, char const *s) {
+	isize len = gb_strlen(s);
+	char *c_str = gb_alloc_array(a, char, len+1);
+	gb_memmove(c_str, s, len);
+	c_str[len] = '\0';
+	return c_str;
+}
+
 
 
 gb_inline bool str_eq_ignore_case(String const &a, String const &b) {
@@ -162,12 +170,7 @@ GB_COMPARE_PROC(string_cmp_proc) {
 
 gb_inline bool str_eq(String const &a, String const &b) {
 	if (a.len != b.len) return false;
-	for (isize i = 0; i < a.len; i++) {
-		if (a.text[i] != b.text[i]) {
-			return false;
-		}
-	}
-	return true;
+	return memcmp(a.text, b.text, a.len) == 0;
 }
 gb_inline bool str_ne(String const &a, String const &b) { return !str_eq(a, b);                }
 gb_inline bool str_lt(String const &a, String const &b) { return string_compare(a, b) < 0;     }
@@ -658,10 +661,25 @@ bool unquote_char(String s, u8 quote, Rune *rune, bool *multiple_bytes, String *
 }
 
 
+String strip_carriage_return(gbAllocator a, String s) {
+	isize buf_len = s.len;
+	u8 *buf = gb_alloc_array(a, u8, buf_len);
+	isize i = 0;
+	for (isize j = 0; j < s.len; j++) {
+		u8 c = s.text[j];
+
+		if (c != '\r') {
+			buf[i++] = c;
+		}
+	}
+	return make_string(buf, i);
+}
+
+
 // 0 == failure
 // 1 == original memory
 // 2 == new allocation
-i32 unquote_string(gbAllocator a, String *s_, u8 quote=0) {
+i32 unquote_string(gbAllocator a, String *s_, u8 quote=0, bool has_carriage_return=false) {
 	String s = *s_;
 	isize n = s.len;
 	if (quote == 0) {
@@ -679,6 +697,11 @@ i32 unquote_string(gbAllocator a, String *s_, u8 quote=0) {
 	if (quote == '`') {
 		if (string_contains_char(s, '`')) {
 			return 0;
+		}
+
+		if (has_carriage_return) {
+			*s_ = strip_carriage_return(a, s);
+			return 2;
 		}
 		*s_ = s;
 		return 1;
@@ -738,4 +761,43 @@ i32 unquote_string(gbAllocator a, String *s_, u8 quote=0) {
 		*s_ = make_string(buf, offset);
 	}
 	return 2;
+}
+
+
+isize levenstein_distance_case_insensitive(String const &a, String const &b) {
+	isize w = a.len+1;
+	isize h = b.len+1;
+	isize *matrix = gb_alloc_array(heap_allocator(), isize, w*h);
+	for (isize i = 0; i <= a.len; i++) {
+		matrix[i*w + 0] = i;
+	}
+	for (isize i = 0; i <= b.len; i++) {
+		matrix[0*w + i] = i;
+	}
+
+	for (isize i = 1; i <= a.len; i++) {
+		char a_c = gb_char_to_lower(cast(char)a.text[i-1]);
+		for (isize j = 1; j <= b.len; j++) {
+			char b_c = gb_char_to_lower(cast(char)b.text[j-1]);
+			if (a_c == b_c) {
+				matrix[i*w + j] = matrix[(i-1)*w + j-1];
+			} else {
+				isize remove = matrix[(i-1)*w + j] + 1;
+				isize insert = matrix[i*w + j-1] + 1;
+				isize substitute = matrix[(i-1)*w + j-1] + 1;
+				isize minimum = remove;
+				if (insert < minimum) {
+					minimum = insert;
+				}
+				if (substitute < minimum) {
+					minimum = substitute;
+				}
+				matrix[i*w + j] = minimum;
+			}
+		}
+	}
+
+	isize res = matrix[a.len*w + b.len];
+	gb_free(heap_allocator(), matrix);
+	return res;
 }

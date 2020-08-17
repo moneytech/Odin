@@ -21,6 +21,8 @@ enum AddressingMode {
 	                          // 	rhs: acts like OptionalOk
 	Addressing_OptionalOk,    // rhs: acts like a value with an optional boolean part (for existence check)
 	Addressing_SoaVariable,   // Struct-Of-Arrays indexed variable
+
+	Addressing_AtomOpAssign,  // Specialized for custom atom operations for assignments
 };
 
 struct TypeAndValue {
@@ -75,6 +77,8 @@ struct AstFile {
 	AstPackage * pkg;
 	Scope *      scope;
 
+	Arena        arena;
+
 	Ast *        pkg_decl;
 	String       fullpath;
 	Tokenizer    tokenizer;
@@ -98,9 +102,10 @@ struct AstFile {
 	Array<Ast *> imports; // 'import' 'using import'
 	isize        directive_count;
 
-
 	Ast *        curr_proc;
 	isize        error_count;
+	f64          time_to_tokenize; // seconds
+	f64          time_to_parse;    // seconds
 
 	CommentGroup *lead_comment;     // Comment (block) before the decl
 	CommentGroup *line_comment;     // Comment after the semicolon
@@ -111,6 +116,9 @@ struct AstFile {
 #define PARSER_MAX_FIX_COUNT 6
 	isize    fix_count;
 	TokenPos fix_prev_pos;
+
+	struct LLVMOpaqueMetadata *llvm_metadata;
+	struct LLVMOpaqueMetadata *llvm_metadata_scope;
 };
 
 
@@ -129,16 +137,16 @@ struct AstPackage {
 
 
 struct Parser {
-	String                 init_fullpath;
-	StringSet              imported_files; // fullpath
-	Map<AstPackage *>      package_map; // Key: String (package name)
-	Array<AstPackage *>    packages;
-	Array<ImportedPackage> package_imports;
-	isize                  file_to_process_count;
-	isize                  total_token_count;
-	isize                  total_line_count;
-	gbMutex                file_add_mutex;
-	gbMutex                file_decl_mutex;
+	String                  init_fullpath;
+	StringSet               imported_files; // fullpath
+	StringMap<AstPackage *> package_map; // Key(package name)
+	Array<AstPackage *>     packages;
+	Array<ImportedPackage>  package_imports;
+	isize                   file_to_process_count;
+	isize                   total_token_count;
+	isize                   total_line_count;
+	gbMutex                 file_add_mutex;
+	gbMutex                 file_decl_mutex;
 };
 
 
@@ -163,22 +171,23 @@ enum ProcInlining {
 enum ProcTag {
 	ProcTag_bounds_check    = 1<<0,
 	ProcTag_no_bounds_check = 1<<1,
+
 	ProcTag_require_results = 1<<4,
+	ProcTag_optional_ok     = 1<<5,
 };
 
 enum ProcCallingConvention {
 	ProcCC_Invalid = 0,
 	ProcCC_Odin,
 	ProcCC_Contextless,
+	ProcCC_Pure,
 	ProcCC_CDecl,
 	ProcCC_StdCall,
 	ProcCC_FastCall,
 
-	// TODO(bill): Add extra calling conventions
-	// ProcCC_VectorCall,
-	// ProcCC_ClrCall,
-
 	ProcCC_None,
+
+	ProcCC_MAX,
 
 
 	ProcCC_ForeignBlockDefault = -1,
@@ -250,6 +259,7 @@ enum StmtAllowFlag {
 		ProcInlining inlining; \
 		Token where_token; \
 		Array<Ast *> where_clauses; \
+		DeclInfo *decl; \
 	}) \
 	AST_KIND(CompoundLit, "compound literal", struct { \
 		Ast *type; \
@@ -265,6 +275,7 @@ AST_KIND(_ExprBegin,  "",  bool) \
 	AST_KIND(ParenExpr,    "parentheses expression", struct { Ast *expr; Token open, close; }) \
 	AST_KIND(SelectorExpr, "selector expression",    struct { Token token; Ast *expr, *selector; }) \
 	AST_KIND(ImplicitSelectorExpr, "implicit selector expression",    struct { Token token; Ast *selector; }) \
+	AST_KIND(SelectorCallExpr, "selector call expression",    struct { Token token; Ast *expr, *call; bool modified_call; }) \
 	AST_KIND(IndexExpr,    "index expression",       struct { Ast *expr, *index; Token open, close; }) \
 	AST_KIND(DerefExpr,    "dereference expression", struct { Token op; Ast *expr; }) \
 	AST_KIND(SliceExpr,    "slice expression", struct { \
@@ -280,10 +291,13 @@ AST_KIND(_ExprBegin,  "",  bool) \
 		Token        close; \
 		Token        ellipsis; \
 		ProcInlining inlining; \
+		bool         optional_ok_one; \
 	}) \
-	AST_KIND(FieldValue,    "field value",         struct { Token eq; Ast *field, *value; }) \
-	AST_KIND(TernaryExpr,   "ternary expression",  struct { Ast *cond, *x, *y; }) \
-	AST_KIND(TypeAssertion, "type assertion",      struct { Ast *expr; Token dot; Ast *type; }) \
+	AST_KIND(FieldValue,      "field value",              struct { Token eq; Ast *field, *value; }) \
+	AST_KIND(TernaryExpr,     "ternary expression",       struct { Ast *cond, *x, *y; }) \
+	AST_KIND(TernaryIfExpr,   "ternary if expression",    struct { Ast *x, *cond, *y; }) \
+	AST_KIND(TernaryWhenExpr, "ternary when expression",  struct { Ast *x, *cond, *y; }) \
+	AST_KIND(TypeAssertion, "type assertion",      struct { Ast *expr; Token dot; Ast *type; Type *type_hint; }) \
 	AST_KIND(TypeCast,      "type cast",           struct { Token token; Ast *type, *expr; }) \
 	AST_KIND(AutoCast,      "auto_cast",           struct { Token token; Ast *expr; }) \
 AST_KIND(_ExprEnd,       "", bool) \
@@ -488,6 +502,10 @@ AST_KIND(_TypeBegin, "", bool) \
 		Token token; \
 		Ast *type; \
 	}) \
+	AST_KIND(RelativeType, "relative type", struct { \
+		Ast *tag; \
+		Ast *type; \
+	}) \
 	AST_KIND(ArrayType, "array type", struct { \
 		Token token; \
 		Ast *count; \
@@ -572,6 +590,16 @@ isize const ast_variant_sizes[] = {
 #undef AST_KIND
 };
 
+struct AstCommonStuff {
+	AstKind      kind;
+	u32          state_flags;
+	u32          viral_state_flags;
+	bool         been_handled;
+	AstFile *    file;
+	Scope *      scope;
+	TypeAndValue tav;
+};
+
 struct Ast {
 	AstKind      kind;
 	u32          state_flags;
@@ -619,8 +647,9 @@ gb_inline bool is_ast_when_stmt(Ast *node) {
 
 gb_global Arena global_ast_arena = {};
 
-gbAllocator ast_allocator(void) {
-	Arena *arena = &global_ast_arena;
+gbAllocator ast_allocator(AstFile *f) {
+	Arena *arena = f ? &f->arena : &global_ast_arena;
+	// Arena *arena = &global_ast_arena;
 	return arena_allocator(arena);
 }
 

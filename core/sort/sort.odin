@@ -103,7 +103,7 @@ _log2 :: proc(x: int) -> int {
 	return res;
 }
 
-merge_sort_proc :: proc(array: $A/[]$T, f: proc(T, T) -> int) where intrinsics.type_is_ordered(T) {
+merge_sort_proc :: proc(array: $A/[]$T, f: proc(T, T) -> int) {
 	merge :: proc(a: A, start, mid, end: int, f: proc(T, T) -> int) {
 		s, m := start, mid;
 
@@ -267,6 +267,81 @@ compare_ints :: proc(a, b: int) -> int {
 	return 0;
 }
 
+compare_uints :: proc(a, b: uint) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_u8s :: proc(a, b: u8) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_u16s :: proc(a, b: u16) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_u32s :: proc(a, b: u32) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_u64s :: proc(a, b: u64) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_i8s :: proc(a, b: i8) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_i16s :: proc(a, b: i16) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_i32s :: proc(a, b: i32) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+compare_i64s :: proc(a, b: i64) -> int {
+	switch {
+	case a < b: return -1;
+	case a > b: return +1;
+	}
+	return 0;
+}
+
+
+
+
 compare_f32s :: proc(a, b: f32) -> int {
 	switch delta := a - b; {
 	case delta < 0: return -1;
@@ -285,4 +360,55 @@ compare_strings :: proc(a, b: string) -> int {
 	x := transmute(mem.Raw_String)a;
 	y := transmute(mem.Raw_String)b;
 	return mem.compare_byte_ptrs(x.data, y.data, min(x.len, y.len));
+}
+
+
+binary_search :: proc(array: $A/[]$T, key: T) -> (index: int, found: bool)
+	where intrinsics.type_is_ordered(T) #no_bounds_check {
+
+	n := len(array);
+	switch n {
+	case 0:
+		return -1, false;
+	case 1:
+		if array[0] == key {
+			return 0, true;
+		}
+		return -1, false;
+	}
+
+	lo, hi := 0, n-1;
+
+	for array[hi] != array[lo] && key >= array[lo] && key <= array[hi] {
+		when intrinsics.type_is_ordered_numeric(T) {
+			// NOTE(bill): This is technically interpolation search
+			m := lo + int((key - array[lo]) * T(hi - lo) / (array[hi] - array[lo]));
+		} else {
+			m := (lo + hi)/2;
+		}
+		switch {
+		case array[m] < key:
+			lo = m + 1;
+		case key < array[m]:
+			hi = m - 1;
+		case:
+			return m, true;
+		}
+	}
+
+	if key == array[lo] {
+		return lo, true;
+	}
+	return -1, false;
+}
+
+
+linear_search :: proc(array: $A/[]$T, key: T) -> (index: int, found: bool)
+	where intrinsics.type_is_comparable(T) #no_bounds_check {
+	for x, i in array {
+		if x == key {
+			return i, true;
+		}
+	}
+	return -1, false;
 }
